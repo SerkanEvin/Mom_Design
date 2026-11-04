@@ -52,7 +52,7 @@ def _call(method: str, path: str, **kw) -> dict:
         r = httpx.request(method, url, timeout=30, headers={"Authorization": f"Bearer {secret('studio')}"}, **kw)
     except httpx.HTTPError as e:
         raise AgentUnavailable(f"aicp'ye ulaşılamadı ({type(e).__name__})")
-    if r.status_code != 200:
+    if not 200 <= r.status_code < 300:       # send answers 202 Accepted
         raise AgentUnavailable(f"aicp cevap vermedi (HTTP {r.status_code})")
     return r.json()
 

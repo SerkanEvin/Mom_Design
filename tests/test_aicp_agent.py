@@ -128,3 +128,17 @@ def test_blender_page_edit_goes_to_agent_and_failure_is_kind(client, users, hook
 def test_builtin_loop_without_token(env):
     from studio import aicp_agent
     assert not aicp_agent.enabled()
+
+
+def test_hook_202_is_accepted(env, monkeypatch):
+    from studio import aicp_agent, config
+    config.get_settings().studio_hook_url = "http://hook"
+    monkeypatch.setenv("AICP_STUDIO_TOKEN", "t")
+
+    class R:
+        status_code = 202
+
+        def json(self):
+            return {"message_id": "m1", "session": "s1", "status": "dispatched"}
+    monkeypatch.setattr(aicp_agent.httpx, "request", lambda *a, **k: R())
+    assert aicp_agent.send("x")["message_id"] == "m1"
