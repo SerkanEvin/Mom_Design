@@ -33,12 +33,19 @@ def _face_colors(geom: trimesh.Trimesh) -> np.ndarray:
     vis = geom.visual
     try:
         if isinstance(vis, trimesh.visual.texture.TextureVisuals):
-            if vis.uv is not None and getattr(vis.material, "image", None) is not None or \
-                    getattr(vis.material, "baseColorTexture", None) is not None:
+            mat = vis.material
+            has_tex = getattr(mat, "image", None) is not None or getattr(mat, "baseColorTexture", None) is not None
+            if vis.uv is not None and has_tex:
                 cv = vis.to_color()
                 vc = np.asarray(cv.vertex_colors)[:, :3].astype(float)
                 return vc[geom.faces].mean(axis=1).astype(np.uint8)
-            mat = vis.material
+            # glTF COLOR_0 next to a plain material (e.g. Blender export) lands here
+            attr = getattr(vis, "vertex_attributes", {}).get("color")
+            if attr is not None and len(attr) == len(geom.vertices):
+                vc = np.asarray(attr, dtype=float)[:, :3]
+                if vc.max() <= 1.0:
+                    vc = vc * 255.0
+                return np.clip(vc[geom.faces].mean(axis=1), 0, 255).astype(np.uint8)
             base = getattr(mat, "baseColorFactor", None)
             if base is None:
                 base = getattr(mat, "main_color", None)
@@ -88,19 +95,21 @@ def load(path: Path) -> trimesh.Trimesh:
         except Exception as e:
             raise MeshError(f"Model okunamadı ({type(e).__name__}).") from e
     geoms: list[trimesh.Trimesh] = []
+    colors: list[np.ndarray] = []
     if isinstance(loaded, trimesh.Scene):
         for node in loaded.graph.nodes_geometry:
             transform, gname = loaded.graph[node]
             g = loaded.geometry[gname]
             if isinstance(g, trimesh.Trimesh) and len(g.faces):
-                g = g.copy()
+                colors.append(_face_colors(g))      # before copy(): copy drops glTF vertex attributes
+                g = trimesh.Trimesh(g.vertices.copy(), g.faces.copy(), process=False)
                 g.apply_transform(transform)
                 geoms.append(g)
     elif isinstance(loaded, trimesh.Trimesh):
         geoms = [loaded]
+        colors = [_face_colors(loaded)]
     if not geoms:
         raise MeshError("Dosyada üçgen ağ (mesh) yok.")
-    colors = [_face_colors(g) for g in geoms]
     merged = trimesh.util.concatenate([trimesh.Trimesh(g.vertices, g.faces, process=False) for g in geoms])
     rgb = np.concatenate(colors, axis=0)
     merged.metadata["face_rgb"] = rgb
