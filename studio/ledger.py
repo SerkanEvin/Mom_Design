@@ -162,7 +162,12 @@ def set_fal_balance(amount: float) -> None:
 
 
 def recover_stale_reservations(max_age_s: int = 6 * 3600) -> None:
-    """Reservations left by a crash with no fal request attached are refunded."""
+    """Reservations left by a crash with no fal request attached are refunded. Ones that did reach fal
+    but whose job ended (failed/cancelled) more than a day ago are counted as spent: fal may have billed."""
+    db.execute("UPDATE ledger SET status='settled', note='zaman aşımı: harcandı sayıldı', updated_at=?"
+               " WHERE kind='charge' AND status='reserved' AND fal_request_id IS NOT NULL AND created_at<?"
+               " AND job_id IN (SELECT id FROM jobs WHERE status IN ('failed','cancelled'))",
+               db.now(), db.now() - 86400)
     db.execute("UPDATE ledger SET status='refunded', note='yarım kalan ayırma', updated_at=?"
                " WHERE kind='charge' AND status='reserved' AND fal_request_id IS NULL AND created_at<?",
                db.now(), db.now() - max_age_s)

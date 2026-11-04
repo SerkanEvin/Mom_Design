@@ -134,3 +134,18 @@ def test_owner_saves_fal_key(client, users, monkeypatch):
     assert client.post("/api/admin/fal_key", json={"key": "abc123:" + "x" * 30}, headers=H).status_code == 200
     assert secret("fal").startswith("abc123:")
     assert client.get("/api/admin/overview").json()["fal"]["key_configured"]
+
+
+def test_stale_reservations(env, users):
+    from studio import db, ledger, jobs
+    env[0].daily_cap_usd = 100
+    aid = users["asli"][0]
+    jid = jobs.create_job(aid, "mod01", {})
+    a = ledger.reserve(aid, 0.3, job_id=jid, step="x", endpoint_id="e")            # never reached fal
+    b = ledger.reserve(aid, 0.2, job_id=jid, step="y", endpoint_id="e")
+    ledger.attach_request(b, "req-1")                                                # reached fal
+    db.execute("UPDATE ledger SET created_at=created_at-200000")
+    db.execute("UPDATE jobs SET status='failed' WHERE id=?", jid)
+    ledger.recover_stale_reservations()
+    st = {r["id"]: r["status"] for r in db.rows("SELECT id,status FROM ledger WHERE kind='charge'")}
+    assert st[a] == "refunded" and st[b] == "settled"
