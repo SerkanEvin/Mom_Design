@@ -3,6 +3,8 @@
 Two-colour test model (blue block, red ball) + a small floating speck. Blender: remove the speck, emboss "ASLI"
 on the block's front via an anchor, drill a hole through the top. Then colours are copied back and checked:
 text must sit on the block front and be a new (white) colour; block stays blue, ball stays red.
+Notes/agent: a note pin on the ball's front must project onto red pixels of Blender's FRONT render and be hidden
+in the BACK view. A drawing must become a printable two-colour relief keychain.
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ def main() -> int:
         first = blender.run_blender({"input": str(src), "height_mm": 60, "ops": [], "render_dir": str(work / "r0"),
                                     "output": str(work / "start.glb")}, work)
         meshio.transfer_colors(work / "start.ref.glb", work / "start.glb", work / "cur0.glb")
+        out["pins"] = _pin_check(src, first)
         ops = blender.validate_ops([
             {"op": "remove_loose_parts", "min_fraction": 0.01},
             {"op": "emboss_text", "text": "ASLI", "anchor": {"view": "front", "u": 50, "v": 72}, "size_mm": 9,
@@ -102,7 +105,7 @@ def main() -> int:
                    and bt["erased_cm3"] > 0.05)
         out["base_text"]["pass"] = bool(base_ok)
         b = out["blender"]
-        ok = base_ok and (b["text_faces"] > 50 and b["text_is_dark"] > 0.6 and 2 < b["text_z_range_mm"][0] < b["text_z_range_mm"][1] < 18
+        ok = base_ok and out["pins"]["pass"] and (b["text_faces"] > 50 and b["text_is_dark"] > 0.6 and 2 < b["text_z_range_mm"][0] < b["text_z_range_mm"][1] < 18
               and b["block_is_blue"] > 0.8 and (b["ball_is_red"] or 0) > 0.8 and res["stats"]["watertight"])
         out["blender"]["pass"] = bool(ok)
     except Exception as e:
@@ -117,9 +120,52 @@ def main() -> int:
     data = threemf.painted_3mf(p, seg["labels"], seg["palette"], "selftest")
     out["print"] = {"watertight": rep["watertight"], "is_printable": rep["is_printable"], "parts": rep["parts"],
                     "palette": seg["palette"], "painted_faces": sum(1 for c in threemf.read_painted_labels(data) if c)}
+    out["relief"] = _relief_check(work)
+    ok = ok and out["relief"]["pass"]
     out["work"] = str(work)
     print(json.dumps(out, ensure_ascii=False))
     return 0 if ok and rep["watertight"] else 1
+
+
+def _pin_check(src: Path, first: dict) -> dict:
+    """A viewer tap on the ball's front (glTF coords) -> agent projection -> Blender's FRONT render pixel."""
+    from PIL import Image
+    # ball centre (0, 0, 20) r=12 in the Z-up source; its front point (0, -12, 20) is (0, 20, 12) in glTF (Y-up)
+    pts, mesh = blender.to_print_mm(src, "y", 60, [[0, 20, 12]])
+    marks = blender.project_pins([{"n": 1, "mm": pts[0].tolist()}], first["frame"], mesh)
+    out = {"views": sorted(marks)}
+    front = next((m for m in marks.get("front", []) if m["n"] == 1), None)
+    if front:
+        im = np.asarray(Image.open(next(p for p in first["renders"] if Path(p).stem == "front")).convert("RGB")).astype(int)
+        h, w, _ = im.shape
+        x, y = int(front["u"] / 100 * w), int(front["v"] / 100 * h)
+        patch = im[max(0, y - 3):y + 4, max(0, x - 3):x + 4].reshape(-1, 3)
+        r, g, b = np.median(patch, axis=0)
+        out.update(uv=[front["u"], front["v"]], pixel=[int(r), int(g), int(b)])
+        out["pass"] = bool(r > g + 40 and r > b + 40 and "back" not in marks)
+    else:
+        out["pass"] = False
+    return out
+
+
+def _relief_check(work: Path) -> dict:
+    from PIL import Image, ImageDraw
+    from . import relief
+    im = Image.new("RGB", (900, 700), (246, 244, 236))
+    d = ImageDraw.Draw(im)
+    d.ellipse((250, 120, 650, 520), outline=(30, 60, 190), width=16)
+    d.line((350, 300, 550, 360), fill=(30, 60, 190), width=14)
+    im.save(work / "drawing.png")
+    try:
+        m = relief.build(work / "drawing.png", kind="keychain", width_mm=50)
+        rep, _ = audit.audit(m)
+        data = threemf.painted_3mf(m, (m.metadata["face_rgb"][:, 0] < 200).astype(np.int32), ["#f5f5f0", "#1e3cbe"],
+                                   "relief")
+        info = m.metadata["relief"]
+        ok = rep["watertight"] and rep["is_printable"] and 3.5 < info["height_mm"] < 5 and len(data) > 1000
+        return {"pass": bool(ok), **info, "printable": rep["is_printable"], "problems": rep["problems"]}
+    except Exception as e:
+        return {"pass": False, "error": f"{type(e).__name__}: {e}"[:300]}
 
 
 if __name__ == "__main__":

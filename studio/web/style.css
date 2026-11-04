@@ -170,3 +170,8 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line
 .pen.on { box-shadow: 0 0 0 3px var(--accent); }
 .strip { display: grid; grid-auto-flow: column; grid-auto-columns: 130px; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
 .tile.mini .thumb { aspect-ratio: 4/3; background-color: #fff; background-size: contain; }
+.askcard { border-color: var(--accent); }
+.askcard .ic { font-size: 1.4rem; }
+.askcard .asktext { font-size: 1.1rem; font-weight: 700; }
+.praise { color: var(--accent); font-weight: 700; }
+.dot.ask { background: var(--warn); animation: pulse 1.2s infinite; }

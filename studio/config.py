@@ -97,6 +97,9 @@ class Settings:
     daily_cap_usd: float = field(default_factory=lambda: _f("STUDIO_DAILY_CAP_USD", 3.0))       # all users, guards against bugs
     fal_balance_usd: float = field(default_factory=lambda: _f("STUDIO_FAL_BALANCE_USD", 9.0))   # real fal balance Serkan reported
     member_llm_per_hour: int = field(default_factory=lambda: int(_f("STUDIO_MEMBER_LLM_PER_HOUR", 60)))
+    # the design agent just does a user's first N sends; from send N+1 on it shows its plan and waits for "Tamam"
+    agent_confirm_after: int = field(default_factory=lambda: int(_f("STUDIO_AGENT_CONFIRM_AFTER", 2)))
+    agent_max_questions: int = field(default_factory=lambda: int(_f("STUDIO_AGENT_MAX_QUESTIONS", 2)))
 
     # Models
     view_model: str = field(default_factory=lambda: os.environ.get("STUDIO_VIEW_MODEL", "fal-ai/hidream-o1-image/dev/edit"))

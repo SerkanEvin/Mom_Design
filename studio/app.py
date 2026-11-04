@@ -377,7 +377,7 @@ async def start_edit(req: Request, u=Depends(current_user)):
 
 @app.get("/api/jobs")
 def list_jobs(active: int = 0, u=Depends(current_user)):
-    q = "SELECT * FROM jobs WHERE user_id=?" + (" AND status IN ('queued','running')" if active else "") + \
+    q = "SELECT * FROM jobs WHERE user_id=?" + (" AND status IN ('queued','running','waiting')" if active else "") + \
         " ORDER BY created_at DESC LIMIT 50"
     return {"jobs": [_job_json(r) for r in db.rows(q, u["id"])]}
 
@@ -395,9 +395,25 @@ def get_job(job_id: str, u=Depends(current_user)):
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_job(job_id: str, u=Depends(current_user)):
     _job_for(u, job_id)
-    db.execute("UPDATE jobs SET status='cancelled', updated_at=? WHERE id=? AND status IN ('queued','running')",
+    db.execute("UPDATE jobs SET status='cancelled', updated_at=? WHERE id=? AND status IN ('queued','running','waiting')",
                db.now(), job_id)
     return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/answer")
+async def answer_job(job_id: str, req: Request, u=Depends(current_user)):
+    """Her answer to the agent's question or plan ("ok": true = Tamam). The job continues from where it paused."""
+    from . import agent
+    r = _job_for(u, job_id)
+    if r["status"] != "waiting" or r["module"] != "agent":
+        raise HTTPException(409, "Bu iş bir cevap beklemiyor")
+    b = await req.json()
+    text = str(b.get("text", "")).strip()[:600]
+    j = jobs.Job(r)
+    agent.answer(j, text, bool(b.get("ok")))
+    j.save()
+    db.execute("UPDATE jobs SET status='queued', updated_at=? WHERE id=? AND status='waiting'", db.now(), job_id)
+    return _job_json(db.row("SELECT * FROM jobs WHERE id=?", job_id))
 
 
 @app.post("/api/jobs/{job_id}/retry")

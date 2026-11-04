@@ -14,11 +14,15 @@ from .config import get_settings
 
 log = logging.getLogger("studio.jobs")
 
-ACTIVE = ("queued", "running")
+ACTIVE = ("queued", "running", "waiting")    # waiting = paused until the user answers the agent
 
 
 class JobFailed(Exception):
     """Ends a job with a user-facing (Turkish) message."""
+
+
+class WaitForUser(Exception):
+    """Pauses a job until the user answers (the question is in ctx["ask"]); /answer re-queues it."""
 
 
 # ---------------------------------------------------------------- assets / versions
@@ -160,6 +164,9 @@ def run_one(r) -> None:
         fn(j)
         db.execute("UPDATE jobs SET status='done', state='DONE', updated_at=? WHERE id=? AND status='running'",
                    db.now(), j.id)
+    except WaitForUser:
+        j.save()
+        db.execute("UPDATE jobs SET status='waiting', updated_at=? WHERE id=? AND status='running'", db.now(), j.id)
     except JobFailed as e:
         _fail(j, str(e))
     except Exception as e:  # message types from our modules are already Turkish
@@ -202,5 +209,6 @@ def public_job(r) -> dict:
     return {"id": r["id"], "module": r["module"], "status": r["status"], "state": r["state"],
             "asset_id": r["asset_id"], "version_id": r["version_id"], "error": r["error"],
             "est_usd": r["est_usd"], "log": json.loads(r["log"]), "result": json.loads(r["ctx"]).get("result"),
+            "ask": json.loads(r["ctx"]).get("ask") if r["status"] == "waiting" else None,
             "created_at": r["created_at"], "updated_at": r["updated_at"],
             "input": {k: v for k, v in json.loads(r["input"]).items() if k != "labels"}}

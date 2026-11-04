@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw
 
 from . import db, falclient, jobs, llm, meshio, relief
 from .config import effort, get_settings
-from .jobs import Job, JobFailed
+from .jobs import Job, JobFailed, WaitForUser
 
 BEGINNER_RULES = (
     "The user is a beginner at design and 3D printing; she prints PLA on a Bambu Lab P2S (0.4 mm nozzle, "
@@ -27,7 +27,19 @@ BEGINNER_RULES = (
     "tall, avoid long overhangs and floating pieces, keep it small enough to print in a few hours (40-100 mm "
     "unless she asks for a size), and prefer 1-3 colours.")
 
-MODEL_PLAN_SYSTEM = BEGINNER_RULES + """
+TALK_RULES = """
+How to talk to her: she is Aslı, Serkan's mother, a warm and curious beginner. Every Turkish text you write is
+warm, simple and kind, like a friend who is truly happy to help her; speak to her with "sen", as the app does; no
+technical words. "praise_tr" is one sincere compliment that names something specific in her idea, drawing or notes
+(never generic flattery, never about yourself).
+Questions: ask ONLY when the answer would change the object a lot and no sensible default exists (e.g. you cannot
+tell what the drawing is, or she wants two things that conflict). Never ask about print settings, sizes you can
+choose, colours you can choose or anything technical: decide those yourself. Never ask again what "dialog"
+already answers; follow her answers there. When you ask, give 2-4 short answer choices.
+Always also return: "praise_tr", "question_tr": null or one short question, "options_tr": [answer choices] or [],
+"plan_tr": 1-2 sentences in plain Turkish saying what you will make (shape, size in cm, colours)."""
+
+MODEL_PLAN_SYSTEM = BEGINNER_RULES + TALK_RULES + """
 You are her design assistant. She left numbered notes on a 3D model (some are pinned to a spot on it). Turn them
 into ONE clear editing request for a Blender operator who sees the model and the numbered pins. Keep her intent
 and words; add only what makes it printable (e.g. a base). Do not invent unrelated changes.
@@ -35,7 +47,7 @@ Return JSON {"directive": English editing request that refers to notes by number
 "height_mm": final model height in mm, "colors": 1..4, "explanation_tr": 1-2 simple Turkish sentences telling
 her what you will do, "tips_tr": [2-4 short Turkish print tips for this object]}."""
 
-DRAWING_PLAN_SYSTEM = BEGINNER_RULES + """
+DRAWING_PLAN_SYSTEM = BEGINNER_RULES + TALK_RULES + """
 You are her design assistant. She made a 2D drawing (or photographed one) and left numbered notes; pins are
 drawn on the image as numbered magenta circles. Decide how to make it a printable object:
 - "relief": the drawing itself becomes a flat object: a keychain (with a ring hole), a plate/sign/coaster/magnet,
@@ -84,6 +96,68 @@ def _notes_text(notes: list[dict], extra: str) -> str:
     return "Notes:\n" + "\n".join(lines)
 
 
+def _dialog_text(j: Job) -> str:
+    d = j.ctx.get("dialog") or []
+    if not d:
+        return ""
+    out = "\nDialog with her so far (follow it): " + json.dumps(d, ensure_ascii=False)
+    if sum(1 for x in d if x.get("kind") == "question") >= get_settings().agent_max_questions:
+        out += "\nDo not ask anything more: decide yourself (question_tr = null)."
+    return out
+
+
+def _settle_plan(j: Job, make_plan, est_usd) -> dict:
+    """Plan once; pause for a question when the agent really needs one, and (from the user's
+    N+1th send on) show the plan and wait for "Tamam". Answers arrive through /api/jobs/<id>/answer."""
+    s = get_settings()
+    if "confirm" not in j.ctx:
+        earlier = db.row("SELECT COUNT(*) AS n FROM jobs WHERE user_id=? AND module='agent' AND created_at<?"
+                         " AND id<>?", j.user_id, db.row("SELECT created_at FROM jobs WHERE id=?", j.id)["created_at"],
+                         j.id)["n"]
+        j.ctx["confirm"] = earlier >= s.agent_confirm_after
+        j.save()
+    if "plan" not in j.ctx:
+        plan = make_plan()
+        asked = sum(1 for d in j.ctx.get("dialog", []) if d.get("kind") == "question")
+        q = str(plan.get("question_tr") or "").strip()
+        if q and asked < s.agent_max_questions:
+            j.ctx["ask"] = {"kind": "question", "text": q, "praise": plan.get("praise_tr"),
+                            "options": [str(o)[:60] for o in (plan.get("options_tr") or [])][:4]}
+            j.log("Sana bir sorusu var: " + q)
+            raise WaitForUser()
+        j.ctx["plan"] = plan
+        j.ctx.pop("ask", None)
+        for k in ("praise_tr", "plan_tr"):
+            if plan.get(k):
+                j.log(str(plan[k]))
+        j.save()
+    plan = j.ctx["plan"]
+    if j.ctx["confirm"] and not j.ctx.get("confirmed"):
+        j.ctx["ask"] = {"kind": "confirm", "text": plan.get("plan_tr") or plan.get("explanation_tr") or "",
+                        "praise": None if j.ctx.get("dialog") else plan.get("praise_tr"), "est_usd": est_usd(plan)}
+        j.log("Plan onayını bekliyor")
+        raise WaitForUser()
+    j.ctx.pop("ask", None)
+    return plan
+
+
+def answer(j: Job, text: str, ok: bool) -> None:
+    """Store her answer to ctx["ask"]; the caller re-queues the job."""
+    ask = j.ctx.get("ask") or {}
+    dialog = j.ctx.setdefault("dialog", [])
+    if ask.get("kind") == "confirm":
+        if ok and not text:
+            j.ctx["confirmed"] = True
+        else:   # she wants a change: re-plan with her words, then confirm again
+            dialog.append({"kind": "change", "plan": ask.get("text"), "answer": text})
+            j.ctx.pop("plan", None)
+    else:
+        dialog.append({"kind": "question", "question": ask.get("text"),
+                       "answer": text or "Sen karar ver, en uygununu seç."})
+    j.ctx.pop("ask", None)
+    j.log("Cevabın: " + (text or ("Tamam" if ok else "Sen karar ver")))
+
+
 def _clamp(v, lo, hi, default):
     try:
         return max(lo, min(hi, float(v)))
@@ -110,6 +184,7 @@ def _finish(j: Job, plan: dict, height: float, colors: int) -> None:
         db.execute("UPDATE notes SET status='done', updated_at=? WHERE id=? AND job_id=?", db.now(), nid, j.id)
     j.ctx["result"] = {"asset_id": j.asset_id, "version_id": j.version_id, "prep_job": pid,
                        "route": plan.get("route", "edit"), "explanation_tr": plan.get("explanation_tr"),
+                       "praise_tr": plan.get("praise_tr"),
                        "tips_tr": [str(t) for t in (plan.get("tips_tr") or [])][:5],
                        "notes": j.ctx.get("result_notes", [])}
     j.save()
@@ -122,20 +197,20 @@ def _run_model(j: Job, eff: dict) -> None:
     from .jobs import blender_lock, version_path
     notes = j.input.get("notes", [])
     path, ver, meta = version_path(j.input["version_id"])
-    if "plan" not in j.ctx:
+    def make_plan() -> dict:
         j.state("AGENT_PLAN", "Notların okunuyor, plan yapılıyor")
         info = {"model": meta.get("spec", {}).get("description") or meta.get("prompt") or "", "name":
                 db.row("SELECT name FROM assets WHERE id=?", ver["asset_id"])["name"],
                 "current_height_mm": meta.get("height_mm"), "requested_height_mm": j.input.get("height_mm")}
         plan = llm.chat_json(MODEL_PLAN_SYSTEM, _notes_text(notes, j.input.get("extra", "")) + "\n"
-                             + json.dumps(info, ensure_ascii=False), user_id=j.user_id, max_tokens=1500)
-        if not isinstance(plan, dict) or not str(plan.get("directive", "")).strip():
+                             + json.dumps(info, ensure_ascii=False) + _dialog_text(j), user_id=j.user_id,
+                             max_tokens=1500)
+        if not isinstance(plan, dict) or not (str(plan.get("directive", "")).strip() or plan.get("question_tr")):
             raise JobFailed("Ajan notlardan bir plan çıkaramadı; notları biraz daha açık yaz.")
-        j.ctx["plan"] = plan
-        if plan.get("explanation_tr"):
-            j.log(str(plan["explanation_tr"]))
-        j.save()
-    plan = j.ctx["plan"]
+        return plan
+    plan = _settle_plan(j, make_plan, lambda p: 0.0)
+    if not str(plan.get("directive", "")).strip():
+        raise JobFailed("Ajan notlardan bir plan çıkaramadı; notları biraz daha açık yaz.")
     height = _clamp(j.input.get("height_mm") or plan.get("height_mm") or meta.get("height_mm"), 5, 250, 80)
     directive = str(plan["directive"]) + "\nBeginner print rules: " + BEGINNER_RULES
     with blender_lock():
@@ -157,19 +232,27 @@ def _run_drawing(j: Job, eff: dict) -> None:
     src = j.dir / "drawing.png"
     if not src.exists():
         raise JobFailed("Çizim bulunamadı.")
-    if "plan" not in j.ctx:
+    def make_plan() -> dict:
         j.state("AGENT_PLAN", "Çizimin ve notların inceleniyor")
         marked = mark_pins(src, j.dir / "drawing_pins.png", notes)
         content = [llm.image_block(marked, 1024), {"type": "text", "text": _notes_text(notes, j.input.get("extra", ""))
-                                                   + "\nEffort: " + eff["name"]}]
+                                                   + "\nEffort: " + eff["name"] + _dialog_text(j)}]
         plan = llm.chat_json(DRAWING_PLAN_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=2000)
-        if not isinstance(plan, dict) or plan.get("route") not in ("relief", "figure"):
-            plan = {"route": "relief", "relief": {}, "explanation_tr": "Çizimini düz, renkli bir plaka yaptım."}
-        j.ctx["plan"] = plan
-        if plan.get("explanation_tr"):
-            j.log(str(plan["explanation_tr"]))
-        j.save()
-    plan = j.ctx["plan"]
+        if not isinstance(plan, dict):
+            plan = {}
+        if plan.get("route") not in ("relief", "figure") and not plan.get("question_tr"):
+            plan = {**plan, "route": "relief", "relief": plan.get("relief") or {},
+                    "explanation_tr": plan.get("explanation_tr") or "Çizimini düz, renkli bir plaka yapıyorum."}
+        return plan
+
+    def cost(p: dict) -> float:
+        from .pipelines import estimate
+        if p.get("route") != "figure":
+            return 0.0
+        return estimate("agent", {"target": "drawing", "effort": eff["name"]})
+    plan = _settle_plan(j, make_plan, cost)
+    if plan.get("route") not in ("relief", "figure"):
+        plan["route"] = "relief"
     name = str(plan.get("name_tr") or j.input.get("name") or "Çizimden model")[:40]
     colors = int(_clamp(plan.get("colors"), 1, 4, 2))
     meta = {"drawing_id": j.input.get("drawing_id"), "notes": [n["text"] for n in notes], "effort": eff["name"]}

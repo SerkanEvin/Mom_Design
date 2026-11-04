@@ -250,3 +250,114 @@ def test_relief_kinds(tmp_path):
     Image.new("RGB", (300, 300), (255, 255, 255)).save(blank)
     with pytest.raises(relief.ReliefError):
         relief.build(blank)
+
+
+def dialog_llm(seen, always_ask=False):
+    """Asks once what the drawing is (or always, to test the cap), then plans a relief using her answer."""
+    def f(system, content, **kw):
+        if "Serkan's mother" not in system:      # print-check advice etc.
+            return fake_llm(system, content, **kw)
+        text = content[-1]["text"] if isinstance(content, list) else content
+        seen.append(text)
+        if always_ask or "Dialog with her" not in text:
+            return {"question_tr": "Bu bir kedi mi, bir tavşan mı?", "options_tr": ["Kedi", "Tavşan"],
+                    "praise_tr": "Ne güzel bir çizim!"}
+        return {"route": "relief", "name_tr": "Kedi", "relief": {"kind": "plate"}, "praise_tr": "Kulaklar çok tatlı!",
+                "plan_tr": "5 cm'lik düz bir kedi plakası yapacağım.", "explanation_tr": "Plaka yaptım."}
+    return f
+
+
+def send(client, did):
+    r = client.post("/api/agent", json={"drawing_id": did}, headers=H)
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_agent_asks_when_needed_then_continues(client, users, monkeypatch, tmp_path):
+    patch(monkeypatch, tmp_path)
+    from studio import llm
+    seen = []
+    monkeypatch.setattr(llm, "chat_json", dialog_llm(seen))
+    login(client, users["asli"][1])
+    did = make_drawing(client)
+    client.post("/api/notes", json={"kind": "drawing", "drawing_id": did, "text": "Bunu bas"}, headers=H)
+    jid = send(client, did)
+    assert client.post(f"/api/jobs/{jid}/answer", json={"text": "x"}, headers=H).status_code == 409   # not waiting yet
+    run_queued()
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "waiting" and j["ask"]["kind"] == "question"
+    assert j["ask"]["options"] == ["Kedi", "Tavşan"] and j["ask"]["praise"] == "Ne güzel bir çizim!"
+    assert any(x["status"] == "waiting" for x in client.get("/api/jobs?active=1").json()["jobs"])
+    r = client.post(f"/api/jobs/{jid}/answer", json={"text": "Kedi"}, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "queued"
+    run_queued()
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "done", j
+    assert '"answer": "Kedi"' in seen[-1]
+    assert j["result"]["praise_tr"] == "Kulaklar çok tatlı!"
+
+
+def test_agent_question_cap(client, users, monkeypatch, tmp_path):
+    patch(monkeypatch, tmp_path)
+    from studio import llm
+    seen = []
+    monkeypatch.setattr(llm, "chat_json", dialog_llm(seen, always_ask=True))
+    login(client, users["asli"][1])
+    did = make_drawing(client)
+    client.post("/api/notes", json={"kind": "drawing", "drawing_id": did, "text": "Bunu bas"}, headers=H)
+    jid = send(client, did)
+    for _ in range(2):
+        run_queued()
+        assert client.get(f"/api/jobs/{jid}").json()["status"] == "waiting"
+        client.post(f"/api/jobs/{jid}/answer", json={"text": ""}, headers=H)     # "Sen karar ver"
+    run_queued()
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "done", j                  # no third question: it decided (relief fallback)
+    assert "Do not ask anything more" in seen[-1]
+
+
+def test_plan_shown_from_third_send(client, users, monkeypatch, tmp_path):
+    patch(monkeypatch, tmp_path)
+    from studio import llm
+    seen = []
+    monkeypatch.setattr(llm, "chat_json", dialog_llm(seen))
+    login(client, users["asli"][1])
+    did = make_drawing(client)
+
+    def one(answer_with=None):
+        client.post("/api/notes", json={"kind": "drawing", "drawing_id": did, "text": "Bir not daha"}, headers=H)
+        jid = send(client, did)
+        run_queued()
+        client.post(f"/api/jobs/{jid}/answer", json={"text": "Kedi"}, headers=H)   # the drawing question
+        run_queued()
+        return jid
+
+    for _ in range(2):   # 1st and 2nd send: no plan step
+        assert client.get(f"/api/jobs/{one()}").json()["status"] == "done"
+    jid = one()          # 3rd send: plan + cost, waits for Tamam
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "waiting" and j["ask"]["kind"] == "confirm"
+    assert j["ask"]["text"] == "5 cm'lik düz bir kedi plakası yapacağım." and j["ask"]["est_usd"] == 0
+    # she asks for a change -> re-plan with her words -> asked to confirm again
+    client.post(f"/api/jobs/{jid}/answer", json={"text": "Biraz daha büyük olsun"}, headers=H)
+    run_queued()
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "waiting" and j["ask"]["kind"] == "confirm"
+    assert "Biraz daha büyük olsun" in seen[-1]
+    client.post(f"/api/jobs/{jid}/answer", json={"ok": True}, headers=H)
+    run_queued()
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "done"
+
+
+def test_cancel_waiting_reopens_notes(client, users, monkeypatch, tmp_path):
+    patch(monkeypatch, tmp_path)
+    from studio import llm
+    monkeypatch.setattr(llm, "chat_json", dialog_llm([]))
+    login(client, users["asli"][1])
+    did = make_drawing(client)
+    client.post("/api/notes", json={"kind": "drawing", "drawing_id": did, "text": "Bunu bas"}, headers=H)
+    jid = send(client, did)
+    run_queued()
+    assert client.post(f"/api/jobs/{jid}/cancel", json={}, headers=H).status_code == 200
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "cancelled"
+    assert client.get(f"/api/drawings/{did}").json()["notes"][0]["status"] == "open"

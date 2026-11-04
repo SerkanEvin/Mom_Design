@@ -207,7 +207,7 @@ async function libraryPage() {
     const r = $("#running", el);
     r.append(h(`<div class="card stack"><b>Devam eden işler</b></div>`));
     jobs.forEach(j => r.firstChild.append(h(`<a href="#/job/${j.id}" class="row" style="text-decoration:none;color:inherit">
-      <span class="dot run"></span><span class="grow">${esc(jobTitle(j))}</span><span class="muted small">${esc(j.log.at(-1)?.m || "Sırada")}</span></a>`)));
+      <span class="dot ${j.status === "waiting" ? "ask" : "run"}"></span><span class="grow">${esc(jobTitle(j))}</span><span class="muted small">${j.status === "waiting" ? "<b>Sana bir sorusu var</b>" : esc(j.log.at(-1)?.m || "Sırada")}</span></a>`)));
   }
   const g = $("#grid", el);
   if (!assets.length) { g.replaceWith(h(`<div class="card empty"><p><b>Henüz model yok.</b></p><p class="muted">Bir fotoğraf yükle, gerisini atölye halletsin.</p><a class="btn" href="#/new/photo">Fotoğraftan başla</a></div>`)); return; }
@@ -348,6 +348,12 @@ async function jobPage(id) {
       if (j.module === "agent") { showAgentResult($("#agentout", el), j); return; }
       foot.append(h(`<a class="btn" href="#/a/${aid}">Modele git</a>`)); return;
     }
+    if (j.status === "waiting" && j.ask) {
+      showAsk($("#agentout", el), j, () => tick());
+      const c = h(`<button class="ghost small">İptal</button>`); c.onclick = async () => { await api(`/api/jobs/${id}/cancel`, { body: {} }); tick(); }; foot.append(c);
+      return;   // no polling while she thinks
+    }
+    $("#agentout", el).querySelector(".askcard")?.remove();
     if (j.status === "failed" || j.status === "cancelled") {
       foot.append(h(`<span class="badge bad">${j.status === "failed" ? "Başarısız" : "İptal"}</span>`));
       if (j.status === "failed") { const b = h(`<button class="small">Tekrar dene</button>`); b.onclick = async () => { await api(`/api/jobs/${id}/retry`, { body: {} }); tick(); }; foot.append(b); }
@@ -358,10 +364,37 @@ async function jobPage(id) {
   };
   tick();
 }
+// the agent asks a question, or (from her 3rd send on) shows its plan and waits for "Tamam"
+function showAsk(box, j, next) {
+  if (box.querySelector(`.askcard[data-k="${j.updated_at}"]`)) return;
+  const a = j.ask; const confirm = a.kind === "confirm";
+  const card = h(`<div class="card stack askcard" data-k="${j.updated_at}"><div class="row"><span class="ic">🤖</span><b class="grow">${confirm ? "Şöyle yapmayı düşünüyorum" : "Sana bir şey sormak istiyorum"}</b></div>
+    ${a.praise ? `<p class="praise">${esc(a.praise)}</p>` : ""}
+    <p class="asktext">${esc(a.text)}</p>
+    ${confirm ? `<div class="cost"><span>${a.est_usd ? `Tahmini maliyet ≈ ${money(a.est_usd)}` : "Bu iş ücretsiz"}</span></div>` : ""}
+    <div class="row opts"></div>
+    <label class="field"><span>${confirm ? "Değiştirmek istediğin bir şey var mı?" : "Ya da kendin yaz"}</span><textarea maxlength="600" rows="2" placeholder="${confirm ? "Örn: Biraz daha büyük olsun" : "Cevabın"}"></textarea></label>
+    <div class="row"><button class="ghost small" data-a="send">Gönder</button></div></div>`);
+  const post = async body => {
+    card.querySelectorAll("button").forEach(b => (b.disabled = true));
+    try { await api(`/api/jobs/${j.id}/answer`, { body }); card.remove(); next(); }
+    catch (e) { toast(e.message); card.querySelectorAll("button").forEach(b => (b.disabled = false)); }
+  };
+  const opts = $(".opts", card);
+  if (confirm) { const ok = h(`<button>✅ Tamam, yap</button>`); ok.onclick = () => post({ ok: true }); opts.append(ok); }
+  else {
+    (a.options || []).forEach(o => { const b = h(`<button class="ghost">${esc(o)}</button>`); b.onclick = () => post({ text: o }); opts.append(b); });
+    const d = h(`<button class="ghost">🤷 Sen karar ver</button>`); d.onclick = () => post({ text: "" }); opts.append(d);
+  }
+  $("[data-a=send]", card).onclick = () => { const t = $("textarea", card).value.trim(); if (!t) return toast("Önce bir şey yaz"); post({ text: t }); };
+  box.replaceChildren(card);
+  $("textarea", card).onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("[data-a=send]", card).click(); } };
+}
 function showAgentResult(box, j) {
   const r = j.result || {};
   if (r.version_id) sessionStorage.setItem("ver:" + r.asset_id, r.version_id);
   box.replaceChildren(h(`<div class="card stack agentcard"><div class="row"><span class="ic">🤖</span><b class="grow">Ajan bitirdi</b><span class="badge ok">Baskıya hazır</span></div>
+    ${r.praise_tr ? `<p class="praise">${esc(r.praise_tr)}</p>` : ""}
     ${r.explanation_tr ? `<p>${esc(r.explanation_tr)}</p>` : ""}
     ${(r.notes || []).length ? `<ul class="problems small">${r.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
     ${(r.tips_tr || []).length ? `<div><b class="small">Baskı ipuçları</b><ul class="problems">${r.tips_tr.map(t => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
@@ -820,7 +853,7 @@ async function drawingPage(id) {
     if (jobsDone.length) {
       const m = h(`<div class="card stack"><b>Bu çizimden yapılanlar</b></div>`);
       jobsDone.forEach(j => m.append(h(`<a class="row" style="text-decoration:none;color:inherit" href="${j.status === "done" && j.result?.asset_id ? `#/a/${j.result.asset_id}` : `#/job/${j.id}`}">
-        <span class="dot ${j.status === "done" ? "ok" : j.status === "failed" ? "bad" : "run"}"></span><span class="grow">${esc(j.result?.explanation_tr || (j.status === "failed" ? j.error : "Ajan çalışıyor…") || "")}</span><span class="small muted">${when(j.created_at)}</span></a>`)));
+        <span class="dot ${j.status === "done" ? "ok" : j.status === "failed" ? "bad" : "run"}"></span><span class="grow">${esc(j.result?.explanation_tr || (j.status === "failed" ? j.error : j.status === "waiting" ? "Sana bir sorusu var" : "Ajan çalışıyor…") || "")}</span><span class="small muted">${when(j.created_at)}</span></a>`)));
       $("#made", el).append(m);
     }
     $("#del", el).onclick = async () => { if (confirm("Çizim silinsin mi?")) { await api(`/api/drawings/${d.id}/delete`, { body: {} }); location.hash = "#/"; } };

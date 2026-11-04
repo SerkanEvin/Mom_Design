@@ -28,7 +28,7 @@ Nothing new needs a fal key, a new secret or a new container setting. The databa
 
 ## 2. Phases
 
-### R0 · Before deploying (Claude, ~1 h, $0)
+### R0 · Before deploying (Claude, ~1 h, $0) — done, needs the container run in R1
 1. **Extend the offline self-test** (`python -m studio.selftest`, runs in the container with real Blender):
    - *Pin check:* put a pin on the test model's red ball, run Blender's first render, project the pin with
      `project_pins`, and check that the render pixel at that u/v is red and that the pin is hidden in the BACK view.
@@ -96,16 +96,13 @@ notes the agent misunderstood (from the job logs). Possible adjustments:
 
 ---
 
-## 3. Decisions for Serkan
-1. **Merge and deploy now** (R0 → R1 today), or wait until you are at the P2S so R2 and R3 happen the same day?
-2. **Default effort for Aslı:** Yüksek (current) or Orta? Orta is a little cheaper and faster, Yüksek corrects more.
-3. **Should the agent ask before spending?** Right now a drawing that becomes a 3D figure spends ≈ 0.08 $ without
-   asking (flat reliefs are free). Option: show the plan ("I'll make a 6 cm figure, ≈ 0.08 $") and wait for "Tamam".
-   This is safer and teaches her more, but adds a step.
-4. **Can the agent ask Aslı questions?** Today it decides on its own when a note is unclear. A question back ("Kaç cm
-   olsun?") would need a small reply box on the job page. Leave it for after R5?
-
----
+## 3. Serkan's decisions (2026-11-04)
+| # | Question | Decision | Built as |
+|---|---|---|---|
+| 1 | When to deploy | **Today** | R0 → R1 run the same day |
+| 2 | Aslı's default effort | **Yüksek** | already the default (`config.DEFAULT_EFFORT`) |
+| 3 | Show the plan before spending? | **Not on her 1st or 2nd send** | the agent just does her first 2 sends; from the 3rd on it shows its plan in plain Turkish (with the cost, or "ücretsiz") and waits for "✅ Tamam, yap", or re-plans with what she writes. `STUDIO_AGENT_CONFIRM_AFTER=2` |
+| 4 | Can the agent ask her? | **Yes, when necessary, and compliment her: she is Serkan's mother** | the job pauses (`waiting`) with one short question, 2–4 answer buttons, "🤷 Sen karar ver" and a free-text box; at most 2 questions per job (`STUDIO_AGENT_MAX_QUESTIONS`), never about technical settings. Every plan starts with one sincere, specific compliment about her idea or drawing, shown on the question, plan and result cards. The library shows "Sana bir sorusu var" |
 
 ## 4. Risks
 | Risk | Mitigation |
