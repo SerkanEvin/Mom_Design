@@ -93,7 +93,7 @@ def main() -> int:
             "max_protrusion_mm": round(float(r[name].max() - R), 2) if name.any() else None,
             "x_span_mm": round(float(x3[name].max() - x3[name].min()), 1) if name.any() else None,
             "text_dark": round(float((rgb3[name].max(axis=1) < 60).mean()), 2) if name.any() else None,
-            "base_white": round(float((rgb3[side & ~name].min(axis=1) > 230).mean()), 2) if side.any() else None,
+            "base_white": round(float((rgb3[side & (np.abs(x3) > 15)].min(axis=1) > 230).mean()), 2) if side.any() else None,
             "erased_cm3": round((r2["stats"]["volume_cm3"] or 0) - (r3["stats"]["volume_cm3"] or 0), 3),
             "watertight": r3["stats"]["watertight"]}
         bt = out["base_text"]
