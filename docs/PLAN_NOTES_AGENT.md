@@ -1,6 +1,6 @@
 # Notes + design agent — rollout plan
 
-Plan · 2026-11-04 · status: **code done on `claude/determined-dijkstra-4z6ytg` (commit `0489853`), not deployed**
+Plan · 2026-11-04 · status: **R0 + R1 done — deployed 2026-11-04 (commit `2ccec68`), self-test passed in the container; next: R2 smoke test**
 
 This plan covers getting the notes, drawing, design-agent, usage-gauge and effort features (see `PLAN.md` §10,
 "Added 2026-11-04 (later)") from a pushed branch to Aslı printing her first object on her own.
@@ -28,7 +28,7 @@ Nothing new needs a fal key, a new secret or a new container setting. The databa
 
 ## 2. Phases
 
-### R0 · Before deploying (Claude, ~1 h, $0) — done, needs the container run in R1
+### R0 · Before deploying (Claude, ~1 h, $0) — done
 1. **Extend the offline self-test** (`python -m studio.selftest`, runs in the container with real Blender):
    - *Pin check:* put a pin on the test model's red ball, run Blender's first render, project the pin with
      `project_pins`, and check that the render pixel at that u/v is red and that the pin is hidden in the BACK view.
@@ -39,7 +39,11 @@ Nothing new needs a fal key, a new secret or a new container setting. The databa
 
 **Done when:** `pytest` is green and the self-test passes locally, apart from the Blender-only steps, which R1 runs.
 
-### R1 · Deploy (infra agent through aicp, ~15 min)
+### R1 · Deploy (infra agent through aicp, ~15 min) — done 2026-11-04
+Result: backup in `/Serkan/MomDesign/backup-20261104/` (database integrity ok + old `src`); image rebuilt in ~4 min;
+`/healthz` ok; tables `notes` and `drawings` created; self-test all pass: the pin landed on the red ball in Blender's
+FRONT render (u 50, v 42.6, pixel 210/84/73) and was hidden from the back; the relief keychain was printable; base text and
+eraser passed. Note: the live `src` is now a plain copy (no `.git`); the old one with `.git` is in the backup.
 1. Back up `/Serkan/MomDesign/data/studio.sqlite`, plus a copy of the current `src`, to
    `/Serkan/MomDesign/backup-2026-11-xx/`.
 2. Upload the repo through the File Bridge to `/projects/mom-design/src` and run `deploy/install.sh` as before.
