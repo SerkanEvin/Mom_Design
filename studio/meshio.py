@@ -27,6 +27,15 @@ def up_axis_for(path: Path) -> str:
     return "z" if path.suffix.lower() in Z_UP_EXTS else "y"
 
 
+def _to_255(a: np.ndarray) -> np.ndarray:
+    """glTF COLOR_0 may be uint8, uint16 (Blender) or float 0..1."""
+    if a.dtype == np.uint16:
+        return a.astype(float) / 257.0
+    if np.issubdtype(a.dtype, np.floating):
+        return a.astype(float) * (255.0 if a.max() <= 1.0 + 1e-6 else 1.0)
+    return a.astype(float)
+
+
 def _face_colors(geom: trimesh.Trimesh) -> np.ndarray:
     """RGB per face (uint8). Textures are sampled at vertex UVs."""
     n = len(geom.faces)
@@ -42,9 +51,7 @@ def _face_colors(geom: trimesh.Trimesh) -> np.ndarray:
             # glTF COLOR_0 next to a plain material (e.g. Blender export) lands here
             attr = getattr(vis, "vertex_attributes", {}).get("color")
             if attr is not None and len(attr) == len(geom.vertices):
-                vc = np.asarray(attr, dtype=float)[:, :3]
-                if vc.max() <= 1.0:
-                    vc = vc * 255.0
+                vc = _to_255(np.asarray(attr)[:, :3])
                 return np.clip(vc[geom.faces].mean(axis=1), 0, 255).astype(np.uint8)
             base = getattr(mat, "baseColorFactor", None)
             if base is None:
