@@ -294,7 +294,8 @@ def edit_loop(j: Job) -> None:
         ops = _erase_ops(j, path, meta.get("up", "y"), height)
         res = run_blender({"input": j.ctx["current"], "height_mm": None, "ops": ops,
                            "render_dir": str(work / "re"), "output": str(work / "erase.glb")}, work)
-        meshio.transfer_colors(Path(res["ref"]), work / "erase.glb", work / "cur_e.glb")
+        meshio.transfer_colors(Path(res["ref"]), work / "erase.glb", work / "cur_e.glb",
+                               own_colors=res.get("own_colors", False))
         for n in res.get("notes", []):
             j.log("Not: " + n)
         history.append({"ops": ops, "note": f"{len(j.input['erase'])} işaretli yer silindi", "stats": res["stats"]})
@@ -344,7 +345,7 @@ def edit_loop(j: Job) -> None:
             j.save()
             continue
         colored = work / f"cur{rnd + 1}.glb"
-        tr = meshio.transfer_colors(Path(res["ref"]), out_glb, colored)
+        tr = meshio.transfer_colors(Path(res["ref"]), out_glb, colored, own_colors=res.get("own_colors", False))
         history.append({"ops": applied, "note": plan.get("explanation_tr"), "stats": res["stats"], "colours": tr,
                         "failed_ops": failed, "notes": res.get("notes", [])})
         j.ctx.update({"current": str(colored), "renders": res["renders"], "stats": res["stats"], "changed": True})

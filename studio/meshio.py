@@ -274,13 +274,17 @@ class ColorSampler:
 
 
 def transfer_colors(ref_path: Path, result_path: Path, out_path: Path, tol: float = 0.5,
-                    new_rgb=(255, 255, 255)) -> dict:
-    """Paint the edited mesh with the reference's colours; faces farther than `tol` (new parts: text,
-    base, added shapes) get `new_rgb` so they can get their own filament later."""
+                    new_rgb=(255, 255, 255), own_colors: bool = False) -> dict:
+    """Paint the edited mesh with the reference's colours. Faces farther than `tol` are new parts (text,
+    base, added shapes): they keep the colour Blender gave them (`own_colors`) or get `new_rgb`."""
     result = geometry_only(result_path)
     rgb, dist = ColorSampler(ref_path).sample(result.triangles_center)
     new = dist > tol
-    rgb[new] = new_rgb
+    if own_colors and new.any():
+        own = face_rgb(load(result_path)).astype(float)
+        rgb[new] = own[new] if len(own) == len(rgb) else new_rgb
+    else:
+        rgb[new] = new_rgb
     result.metadata["face_rgb"] = np.clip(rgb, 0, 255).astype(np.uint8)
     export_glb_with_colors(result, out_path, up="y")
     return {"faces": int(len(result.faces)), "new_faces": int(new.sum())}

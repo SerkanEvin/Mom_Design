@@ -47,13 +47,13 @@ def main() -> int:
         ])
         res = blender.run_blender({"input": str(work / "cur0.glb"), "height_mm": None, "ops": ops,
                                    "render_dir": str(work / "r1"), "output": str(work / "edit.glb")}, work)
-        tr = meshio.transfer_colors(Path(res["ref"]), work / "edit.glb", work / "cur1.glb")
+        tr = meshio.transfer_colors(Path(res["ref"]), work / "edit.glb", work / "cur1.glb", own_colors=res["own_colors"])
         edited = meshio.load(work / "cur1.glb")
         c, rgb = edited.triangles_center, meshio.face_rgb(edited)
         # glTF is Y-up: model x = x, model z(up) = gltf y, model y = -gltf z
         mx, my, mz = c[:, 0], -c[:, 2], c[:, 1]
         text = my < -37.6
-        white = rgb.min(axis=1) > 230
+        white = rgb.max(axis=1) < 60          # embossed text is dark now
         block = (my > -37.4) & (mz < 15) & (np.abs(mx) < 30)
         ball = (mz > 30) & (np.hypot(mx, my) < 15) & (mz < 55)
         out["blender"] = {
@@ -61,7 +61,7 @@ def main() -> int:
             "renders": len(res.get("renders", [])), "colour_transfer": tr,
             "text_faces": int(text.sum()),
             "text_z_range_mm": [round(float(mz[text].min()), 1), round(float(mz[text].max()), 1)] if text.any() else None,
-            "text_is_white": round(float(white[text].mean()), 2) if text.any() else None,
+            "text_is_dark": round(float(white[text].mean()), 2) if text.any() else None,
             "block_is_blue": round(float((rgb[block][:, 2] > 150).mean()), 2),
             "ball_is_red": round(float((rgb[ball][:, 0] > 150).mean()), 2) if ball.any() else None,
         }
@@ -70,14 +70,14 @@ def main() -> int:
                                      {"op": "base_text", "text": "NILDA", "size_mm": 6, "depth_mm": 1.2}])
         r2 = blender.run_blender({"input": str(work / "cur1.glb"), "height_mm": None, "ops": run2,
                                   "render_dir": str(work / "r2"), "output": str(work / "edit2.glb")}, work)
-        meshio.transfer_colors(Path(r2["ref"]), work / "edit2.glb", work / "cur2.glb")
+        meshio.transfer_colors(Path(r2["ref"]), work / "edit2.glb", work / "cur2.glb", own_colors=r2["own_colors"])
         # eraser: a 5 mm sphere bitten out of the top of the ball
         top = r2["stats"]["bbox_max_mm"][2]
         run3 = blender.validate_ops([{"op": "erase_sphere", "center_mm": [0, 0, top], "radius_mm": 5},
                                      {"op": "remove_loose_parts", "min_fraction": 0.02}], internal=True)
         r3 = blender.run_blender({"input": str(work / "cur2.glb"), "height_mm": None, "ops": run3,
                                   "render_dir": None, "output": str(work / "edit3.glb")}, work)
-        meshio.transfer_colors(Path(r3["ref"]), work / "edit3.glb", work / "cur3.glb")
+        meshio.transfer_colors(Path(r3["ref"]), work / "edit3.glb", work / "cur3.glb", own_colors=r3["own_colors"])
         e3 = meshio.load(work / "cur3.glb")
         c3, rgb3 = e3.triangles_center, meshio.face_rgb(e3)
         x3, y3, z3 = c3[:, 0], -c3[:, 2], c3[:, 1]
@@ -92,16 +92,17 @@ def main() -> int:
             "z_range_mm": [round(float(z3[name].min()), 1), round(float(z3[name].max()), 1)] if name.any() else None,
             "max_protrusion_mm": round(float(r[name].max() - R), 2) if name.any() else None,
             "x_span_mm": round(float(x3[name].max() - x3[name].min()), 1) if name.any() else None,
-            "white": round(float((rgb3[name].min(axis=1) > 230).mean()), 2) if name.any() else None,
+            "text_dark": round(float((rgb3[name].max(axis=1) < 60).mean()), 2) if name.any() else None,
+            "base_white": round(float((rgb3[side & ~name].min(axis=1) > 230).mean()), 2) if side.any() else None,
             "erased_cm3": round((r2["stats"]["volume_cm3"] or 0) - (r3["stats"]["volume_cm3"] or 0), 3),
             "watertight": r3["stats"]["watertight"]}
         bt = out["base_text"]
-        base_ok = (bt["text_faces"] > 50 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 1.7
+        base_ok = (bt["text_faces"] > 50 and (bt["text_dark"] or 0) > 0.6 and (bt["base_white"] or 0) > 0.8 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 1.7
                    and 0.5 < bt["z_range_mm"][0] and bt["z_range_mm"][1] < 9.6 and bt["watertight"]
                    and bt["erased_cm3"] > 0.05)
         out["base_text"]["pass"] = bool(base_ok)
         b = out["blender"]
-        ok = base_ok and (b["text_faces"] > 50 and b["text_is_white"] > 0.6 and 2 < b["text_z_range_mm"][0] < b["text_z_range_mm"][1] < 18
+        ok = base_ok and (b["text_faces"] > 50 and b["text_is_dark"] > 0.6 and 2 < b["text_z_range_mm"][0] < b["text_z_range_mm"][1] < 18
               and b["block_is_blue"] > 0.8 and (b["ball_is_red"] or 0) > 0.8 and res["stats"]["watertight"])
         out["blender"]["pass"] = bool(ok)
     except Exception as e:

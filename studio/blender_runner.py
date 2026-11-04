@@ -127,6 +127,26 @@ def view_frame(obj):
 
 
 FRAME = {}
+COLOR = {}          # the model's colour attribute (name, domain, type), so new parts carry colours too
+WHITE = (1.0, 1.0, 1.0, 1.0)                 # added shapes (base, union)
+DARK = (0.013, 0.013, 0.015, 1.0)            # embossed text (linear ~ #1e1e20): contrasts with a white base
+
+
+def remember_colors(obj):
+    attrs = obj.data.color_attributes
+    a = attrs.active_color or (attrs[0] if len(attrs) else None)
+    if a is not None:
+        COLOR.update(name=a.name, domain=a.domain, type=a.data_type)
+
+
+def paint_new(ob, rgba):
+    """Give a new part the model's colour attribute filled with one colour (booleans then merge it)."""
+    if not COLOR:
+        return
+    me = ob.data
+    a = me.color_attributes.get(COLOR["name"]) or me.color_attributes.new(COLOR["name"], COLOR["type"], COLOR["domain"])
+    for item in a.data:
+        item.color = rgba
 
 
 def ray_point(view, u, v):
@@ -182,6 +202,7 @@ def primitive(shape, size, center, rot):
     tool.rotation_euler = [math.radians(a) for a in rot]
     tool.location = center
     bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    paint_new(tool, WHITE)
     return tool
 
 
@@ -354,6 +375,7 @@ def emboss_text(obj, o, centre=None, view=None):
             tt = ts + abs(depth) - z * (abs(depth) + 1.0)
         v.co = base_start + right * x + up * y + d * tt
     me.update()
+    paint_new(t, DARK if depth >= 0 else WHITE)
     select_only(t)
     t.location = (0, 0, 0)
     t.rotation_euler = (0, 0, 0)
@@ -659,6 +681,7 @@ def main():
     if SPEC.get("height_mm"):
         normalise(obj, float(SPEC["height_mm"]))
     weld(obj)
+    remember_colors(obj)
     c, size = view_frame(obj)
     FRAME.update(c=c, size=size)           # anchors refer to the renders of the model as it came in
     ref = None
@@ -671,7 +694,7 @@ def main():
     left = heal(obj)
     if left:
         NOTES.append(f"{left} açık kenar kaldı; baskı hazırlığı onaracak")
-    out = {"ok": True, "stats": stats(obj), "notes": NOTES, "failed_ops": FAILED}
+    out = {"ok": True, "stats": stats(obj), "notes": NOTES, "failed_ops": FAILED, "own_colors": bool(COLOR)}
     if SPEC.get("render_dir"):
         lo, hi = bbox(obj)
         FRAME.update(c=(lo + hi) / 2, size=max(hi - lo) * 1.35)
