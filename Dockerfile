@@ -22,5 +22,5 @@ COPY studio ./studio
 
 ENV STUDIO_DATA=/data BLENDER_BIN=/opt/blender/blender PYTHONUNBUFFERED=1 OMP_NUM_THREADS=4
 EXPOSE 8000
-HEALTHCHECK --interval=60s --timeout=5s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --start-interval=2s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')" || exit 1
 CMD ["uvicorn", "studio.app:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

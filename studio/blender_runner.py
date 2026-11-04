@@ -286,7 +286,11 @@ def main():
         out["renders"] = render(obj, SPEC["render_dir"])
     if SPEC.get("output"):
         select_only(obj)
-        bpy.ops.export_scene.gltf(filepath=SPEC["output"], export_format="GLB", use_selection=True)
+        kw = dict(filepath=SPEC["output"], export_format="GLB", use_selection=True)
+        try:   # keep vertex colours even when no material uses them (Blender 4.2+ option)
+            bpy.ops.export_scene.gltf(**kw, export_vertex_color="ACTIVE")
+        except TypeError:
+            bpy.ops.export_scene.gltf(**kw, export_colors=True)
         out["output"] = SPEC["output"]
     return out
 

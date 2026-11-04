@@ -53,6 +53,7 @@ def main() -> int:
     rep, _ = audit.audit(p)
     seg = segment.segment(p, 3)
     data = threemf.painted_3mf(p, seg["labels"], seg["palette"], "selftest")
+    out["colours_kept_after_blender"] = len(seg["palette"]) >= 2
     out["print"] = {"seconds": round(time.time() - t, 1), "watertight": rep["watertight"],
                     "is_printable": rep["is_printable"], "size_mm": rep["size_mm"], "repairs": notes,
                     "palette": seg["palette"], "3mf_bytes": len(data),
