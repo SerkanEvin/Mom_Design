@@ -269,10 +269,11 @@ async function jobPage(id) {
     const foot = $("#foot", el); foot.innerHTML = "";
     foot.append(h(`<span class="small muted grow">Harcanan ${money(j.cost_usd)}${j.est_usd ? ` · tahmin ${money(j.est_usd)}` : ""}</span>`));
     if (j.module === "mod01") showViews(id, $("#views", el), j);
+    if (j.module === "edit" && j.status === "done") showViews(id, $("#views", el), j, "final_", ["front", "right", "back", "top"]);
     if (j.status === "done") {
       await refreshMe();
       const aid = j.result?.asset_id || j.asset_id;
-      if (aid && ["mod01", "mod02", "import", "edit"].includes(j.module)) { toast("Model hazır!"); location.hash = `#/a/${aid}`; return; }
+      if (aid && ["mod01", "mod02", "import"].includes(j.module)) { toast("Model hazır!"); location.hash = `#/a/${aid}`; return; }
       foot.append(h(`<a class="btn" href="#/a/${aid}">Modele git</a>`)); return;
     }
     if (j.status === "failed" || j.status === "cancelled") {
@@ -285,12 +286,11 @@ async function jobPage(id) {
   };
   tick();
 }
-function showViews(id, box, j) {
-  const names = ["front", "right", "back", "left", "top"];
+function showViews(id, box, j, prefix = "view_", names = ["front", "right", "back", "left", "top"]) {
   names.forEach(n => {
     if (box.querySelector(`[data-v="${n}"]`)) return;
     const img = new Image(); img.dataset.v = n; img.alt = n; img.title = n;
-    img.onload = () => box.append(img); img.src = `/api/jobs/${id}/files/view_${n}.png?t=${Math.round(j.updated_at)}`;
+    img.onload = () => box.append(img); img.src = `/api/jobs/${id}/files/${prefix}${n}.png?t=${Math.round(j.updated_at)}`;
   });
 }
 

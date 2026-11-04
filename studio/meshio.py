@@ -183,3 +183,90 @@ def load_npz(path: Path) -> tuple[trimesh.Trimesh, dict]:
     m.metadata["face_rgb"] = d["face_rgb"]
     extra = {k: d[k] for k in d.files if k not in ("vertices", "faces", "face_rgb")}
     return m, extra
+
+
+# ------------------------------------------------------------------ colour transfer (after Blender edits)
+
+def _scene_parts(path: Path):
+    loaded = trimesh.load(path, process=False)
+    out = []
+    if isinstance(loaded, trimesh.Scene):
+        for node in loaded.graph.nodes_geometry:
+            transform, gname = loaded.graph[node]
+            g = loaded.geometry[gname]
+            if isinstance(g, trimesh.Trimesh) and len(g.faces):
+                out.append((g, transform))
+    elif isinstance(loaded, trimesh.Trimesh):
+        out.append((loaded, np.eye(4)))
+    return out
+
+
+def geometry_only(path: Path) -> trimesh.Trimesh:
+    parts = []
+    for g, tf in _scene_parts(path):
+        m = trimesh.Trimesh(g.vertices.copy(), g.faces.copy(), process=False)
+        m.apply_transform(tf)
+        parts.append(m)
+    if not parts:
+        raise MeshError("Dosyada üçgen ağ (mesh) yok.")
+    return trimesh.util.concatenate(parts)
+
+
+class ColorSampler:
+    """Colour of the reference surface nearest to any point: texture sampled at the exact spot when the
+    reference is textured, otherwise its face colour."""
+
+    def __init__(self, path: Path):
+        meshes, rgbs, self.textured = [], [], []
+        offset = 0
+        for g, tf in _scene_parts(path):
+            rgb = _face_colors(g)
+            m = trimesh.Trimesh(g.vertices.copy(), g.faces.copy(), process=False)
+            m.apply_transform(tf)
+            vis = g.visual
+            mat = getattr(vis, "material", None)
+            img = getattr(mat, "baseColorTexture", None) if mat is not None else None
+            if img is None and mat is not None:
+                img = getattr(mat, "image", None)
+            uv = getattr(vis, "uv", None)
+            if img is not None and uv is not None and len(uv) == len(g.vertices):
+                self.textured.append((offset, offset + len(g.faces), np.asarray(uv), g.faces.copy(), img))
+            meshes.append(m)
+            rgbs.append(rgb)
+            offset += len(g.faces)
+        if not meshes:
+            raise MeshError("Renk kaynağı boş.")
+        self.mesh = trimesh.util.concatenate(meshes)
+        self.rgb = np.concatenate(rgbs).astype(float)
+
+    def sample(self, points: np.ndarray, chunk: int = 20000) -> tuple[np.ndarray, np.ndarray]:
+        rgb_out = np.zeros((len(points), 3))
+        dist_out = np.zeros(len(points))
+        for s in range(0, len(points), chunk):
+            pts = points[s:s + chunk]
+            closest, dist, tri = trimesh.proximity.closest_point(self.mesh, pts)
+            rgb = self.rgb[tri].copy()
+            for lo, hi, uv, faces, img in self.textured:
+                sel = (tri >= lo) & (tri < hi)
+                if not sel.any():
+                    continue
+                local = tri[sel] - lo
+                bary = trimesh.triangles.points_to_barycentric(self.mesh.triangles[tri[sel]], closest[sel])
+                uvp = (bary[:, :, None] * uv[faces[local]]).sum(axis=1)
+                rgb[sel] = trimesh.visual.color.uv_to_color(uvp, img)[:, :3]
+            rgb_out[s:s + chunk] = rgb
+            dist_out[s:s + chunk] = dist
+        return rgb_out, dist_out
+
+
+def transfer_colors(ref_path: Path, result_path: Path, out_path: Path, tol: float = 0.5,
+                    new_rgb=(255, 255, 255)) -> dict:
+    """Paint the edited mesh with the reference's colours; faces farther than `tol` (new parts: text,
+    base, added shapes) get `new_rgb` so they can get their own filament later."""
+    result = geometry_only(result_path)
+    rgb, dist = ColorSampler(ref_path).sample(result.triangles_center)
+    new = dist > tol
+    rgb[new] = new_rgb
+    result.metadata["face_rgb"] = np.clip(rgb, 0, 255).astype(np.uint8)
+    export_glb_with_colors(result, out_path, up="y")
+    return {"faces": int(len(result.faces)), "new_faces": int(new.sum())}

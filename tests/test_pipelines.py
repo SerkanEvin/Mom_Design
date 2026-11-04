@@ -218,11 +218,26 @@ def test_blender_ops_validation():
     import pytest
     from studio.blender import BlenderError, validate_ops
     ok = validate_ops([{"op": "boolean_difference", "shape": "cylinder", "size_mm": [4, 4, 20], "center_mm": [0, 0, 70]},
-                       {"op": "emboss_text", "text": "ASLI", "size_mm": 8, "depth_mm": 1, "center_mm": [0, -10, 5]},
+                       {"op": "boolean_difference", "shape": "cylinder", "size_mm": [4, 4, 20],
+                        "anchor": {"view": "top", "u": 50, "v": 40}, "depth_into_mm": 8},
+                       {"op": "emboss_text", "text": "ASLI", "anchor": {"view": "front", "u": 50, "v": 80}, "size_mm": 8},
+                       {"op": "remove_loose_parts"},
                        {"op": "drop_to_bed"}])
-    assert ok[0]["rotation_deg"] == [0, 0, 0]
+    assert ok[0]["rotation_deg"] == [0, 0, 0] and ok[1]["anchor"]["view"] == "top" and ok[2]["depth_mm"] == 1.2
     for bad in ([{"op": "run_python", "code": "import os"}], [{"op": "scale", "factor": [100, 1, 1]}],
                 [{"op": "boolean_union", "shape": "teapot", "size_mm": [1, 1, 1], "center_mm": [0, 0, 0]}],
-                [{"op": "drop_to_bed"}] * 13):
+                [{"op": "emboss_text", "text": "A", "center_mm": [0, 0, 0]}],           # text needs an anchor
+                [{"op": "emboss_text", "text": "A", "anchor": {"view": "side", "u": 1, "v": 1}}],
+                [{"op": "remesh_voxel", "voxel_mm": 0.1}],
+                [{"op": "remesh_voxel", "voxel_mm": 0.5}, {"op": "remesh_voxel", "voxel_mm": 0.5}],
+                [{"op": "drop_to_bed"}] * 11):
         with pytest.raises(BlenderError):
             validate_ops(bad)
+
+
+def test_grid_overlay(tmp_path):
+    from PIL import Image
+    from studio.blender import grid_overlay
+    Image.new("RGB", (448, 448), (230, 230, 230)).save(tmp_path / "front.png")
+    out = grid_overlay(tmp_path / "front.png", tmp_path / "g.png", "front")
+    assert Image.open(out).size == (448, 448)
