@@ -185,15 +185,60 @@ def primitive(shape, size, center, rot):
     return tool
 
 
+def nonmanifold(obj):
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    n = sum(1 for e in bm.edges if not e.is_manifold)
+    bm.free()
+    return n
+
+
+def heal(obj):
+    """Close small defects booleans can leave: weld, drop degenerate faces, fill small holes."""
+    if nonmanifold(obj) == 0:
+        return 0
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges[:], dist=1e-4)
+    loose = [v for v in bm.verts if not v.link_faces]
+    if loose:
+        bmesh.ops.delete(bm, geom=loose, context="VERTS")
+    edges = [e for e in bm.edges if e.is_boundary]
+    if edges:
+        bmesh.ops.holes_fill(bm, edges=edges, sides=0)
+    bmesh.ops.triangulate(bm, faces=[f for f in bm.faces if len(f.verts) > 4])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
+    return nonmanifold(obj)
+
+
 def boolean(target, tool, operation):
-    mod = target.modifiers.new("bool", "BOOLEAN")
-    mod.operation = operation
-    mod.object = tool
-    try:
-        mod.solver = "EXACT"
-    except Exception:
-        pass
-    apply_mod(target, mod)
+    """Manifold solver first (always closed output for closed input, Blender 4.5+), exact as fallback."""
+    before = len(target.data.polygons)
+    for solver in ("MANIFOLD", "EXACT"):
+        mod = target.modifiers.new("bool", "BOOLEAN")
+        mod.operation = operation
+        mod.object = tool
+        try:
+            mod.solver = solver
+        except Exception:
+            target.modifiers.remove(mod)
+            continue
+        snapshot = target.data.copy()
+        apply_mod(target, mod)
+        if len(target.data.polygons) > 0 and nonmanifold(target) == 0:
+            break
+        if solver == "MANIFOLD":   # undo and retry with the exact solver
+            old = target.data
+            target.data = snapshot
+            bpy.data.meshes.remove(old)
+        else:
+            heal(target)
+    if len(target.data.polygons) == 0:
+        raise RuntimeError("boolean işlemi modeli sildi")
     bpy.data.objects.remove(tool, do_unlink=True)
     select_only(target)
 
@@ -531,6 +576,9 @@ def main():
         bpy.context.collection.objects.link(ref)
         ref.hide_render = True
     obj = run_ops(obj, ref, SPEC.get("ops") or [])
+    left = heal(obj)
+    if left:
+        NOTES.append(f"{left} açık kenar kaldı; baskı hazırlığı onaracak")
     out = {"ok": True, "stats": stats(obj), "notes": NOTES, "failed_ops": FAILED}
     if SPEC.get("render_dir"):
         lo, hi = bbox(obj)

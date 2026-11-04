@@ -80,7 +80,7 @@ def main() -> int:
         c3, rgb3 = e3.triangles_center, meshio.face_rgb(e3)
         x3, y3, z3 = c3[:, 0], -c3[:, 2], c3[:, 1]
         r = np.hypot(x3, y3)
-        name = (r > 45.15) & (z3 < 12) & (y3 < 0)
+        name = (r > 45.15) & (z3 < 8.6) & (y3 < 0)    # below the block (block starts at z=9)
         out["base_text"] = {
             "failed_ops": r2.get("failed_ops", []) + r3.get("failed_ops", []), "notes": r3.get("notes"),
             "text_faces": int(name.sum()),
@@ -90,7 +90,7 @@ def main() -> int:
             "white": round(float((rgb3[name].min(axis=1) > 230).mean()), 2) if name.any() else None,
             "watertight": r3["stats"]["watertight"]}
         bt = out["base_text"]
-        base_ok = (bt["text_faces"] > 50 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 2.2
+        base_ok = (bt["text_faces"] > 50 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 1.6
                    and 0.5 < bt["z_range_mm"][0] and bt["z_range_mm"][1] < 10 and bt["watertight"])
         out["base_text"]["pass"] = bool(base_ok)
         b = out["blender"]
