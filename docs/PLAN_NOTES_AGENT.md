@@ -117,3 +117,41 @@ notes the agent misunderstood (from the job logs). Possible adjustments:
 | The sketch → photo step invents a different object | The figure route's photo is shown on the job page; QA of the generated views still runs; Ekstra redoes more views |
 | Ekstra makes Blender jobs long (5 rounds) while other jobs wait | Only one Blender job runs at a time already; the queue position is shown. Lower Ekstra to 4 rounds if waits get long |
 | AI calls: one agent job uses 3–12 synthetic calls of her 60/hour | The gauge shows it; Ekstra uses the most. Raise `STUDIO_MEMBER_LLM_PER_HOUR` if she hits it |
+
+---
+
+## 5. Incident 2026-11-04: the flag figure (R2 smoke test) and the fix
+
+**What happened** (job `job_6aeb9609fb6861be1e`, notes: 1 "delete this", 2 "draw the Turkish flag properly, crescent
+and star side by side", 3 "both feet equal"):
+- The agent wrote its plan **without seeing the model** (text only), so it asked for a base. The figure already had
+  one. The planner then also scaled and moved the whole model, after which the note pins were text only.
+- Note 1 ("delete this") became a **12 × 14 × 12 mm box cut into the leg**: a rectangular hole.
+- Round 1 embossed "☾ ★" on the flag. The reviewer saw only the AFTER renders and still listed the flag as missing.
+  Round 3 then embossed "☾" and "★" **again**, next to the first ones. The repeat guard only matched identical text,
+  so the result had two crescents and two stars. The reviewer noticed, but the rounds had run out, and the job still
+  ended "done" with that version.
+- Note 3 was impossible with the tools. The agent told her to use an "Ağ Düzenleme" screen that does not exist.
+- The first try (Ekstra) failed on an empty answer from the planner.
+
+**What was changed in the system** (the model was not fixed by hand):
+1. **Each round is reviewed BEFORE vs AFTER**: same 4 views side by side, plus close-ups around the pinned notes.
+   The reviewer gives `good` / `bad` / `no_change`.
+2. **A bad round is rolled back.** The model, renders and frame go back to before that round, and the planner sees
+   it as `rejected` with the reasons. Rolled-back ops are not saved in the version.
+3. **The repeat guard knows where things are.** New text or symbols are dropped when they are made only of symbols
+   already embossed and sit near an earlier emboss in the same view. A second base is still dropped. Only rounds
+   that are really on the model count.
+4. **`erase_note`**: the planner can erase exactly at a note's 3D pin (the eraser ball, plus removing floating
+   bits) instead of cutting shapes into the figure.
+5. **The agent plans while looking at the model.** The first Blender render, with the pins drawn on it, goes to the
+   plan step. It must not add a base when one exists, must not scale or move the whole model unless asked, and
+   lists what it **cannot** do in `cant_do_tr` in kind Turkish, without inventing app screens. If nothing is
+   possible, the job ends with that explanation and her notes become open again.
+6. **Honest result**: leftover items (`missing_tr`), impossible items and the number of undone attempts are shown
+   on the result card ("Henüz yapamadıklarım").
+7. **Empty AI answers**: the next try gets twice the token budget (up to 16 k). The planner now has 6 k.
+8. **Done notes can be reopened** (↺) and sent again.
+
+Not covered yet: resizing one part (e.g. one foot) and recolouring a printed picture would need new Blender
+operations (a region scale and a texture paint).

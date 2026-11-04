@@ -346,6 +346,7 @@ async function jobPage(id) {
       const aid = j.result?.asset_id || j.asset_id;
       if (aid && ["mod01", "mod02", "import"].includes(j.module)) { toast("Model hazır!"); location.hash = `#/a/${aid}`; return; }
       if (j.module === "agent") { showAgentResult($("#agentout", el), j); return; }
+      if (j.module === "edit" && (j.result?.undone || (j.result?.missing_tr || []).length)) $("#agentout", el).replaceChildren(h(`<div class="card stack">${leftovers(j.result)}</div>`));
       foot.append(h(`<a class="btn" href="#/a/${aid}">Modele git</a>`)); return;
     }
     if (j.status === "waiting" && j.ask) {
@@ -390,6 +391,12 @@ function showAsk(box, j, next) {
   box.replaceChildren(card);
   $("textarea", card).onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("[data-a=send]", card).click(); } };
 }
+// what the agent could not do, honestly (undone rounds, still missing, impossible with these tools)
+function leftovers(r) {
+  const items = [...(r.missing_tr || []), ...(r.cant_do_tr || [])];
+  return `${r.undone ? `<p class="small muted">${r.undone} deneme modeli bozduğu için geri alındı; modelde yalnızca iyi olan değişiklikler var.</p>` : ""}
+    ${items.length ? `<div class="leftover"><b class="small">Henüz yapamadıklarım</b><ul class="problems small">${items.map(t => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}`;
+}
 function showAgentResult(box, j) {
   const r = j.result || {};
   if (r.version_id) sessionStorage.setItem("ver:" + r.asset_id, r.version_id);
@@ -397,6 +404,7 @@ function showAgentResult(box, j) {
     ${r.praise_tr ? `<p class="praise">${esc(r.praise_tr)}</p>` : ""}
     ${r.explanation_tr ? `<p>${esc(r.explanation_tr)}</p>` : ""}
     ${(r.notes || []).length ? `<ul class="problems small">${r.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    ${leftovers(r)}
     ${(r.tips_tr || []).length ? `<div><b class="small">Baskı ipuçları</b><ul class="problems">${r.tips_tr.map(t => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
     <p class="small muted">Baskı kontrolü ve renk ayrımı da yapıldı. Baskı sayfasında renkleri değiştirip Bambu dosyasını indirebilirsin.</p>
     <div class="row"><a class="btn" href="#/a/${r.asset_id}/print">🖨️ Baskıya hazırla</a><a class="btn ghost" href="#/a/${r.asset_id}">Modeli gör</a></div></div>`));
@@ -526,8 +534,10 @@ function notesPanel(o) {
     vs.forEach(n => {
       const li = h(`<li class="${n.status}"><span class="num">${nums.has(n.id) ? nums.get(n.id) : "✓"}</span><span class="grow">${esc(n.text)}${n.pos ? "" : ` <span class="small muted">(genel)</span>`}
         ${STATUS_TR[n.status] ? ` <span class="badge ${n.status === "done" ? "ok" : "warn"}">${STATUS_TR[n.status]}</span>` : ""}${n.status === "sent" && n.job_id ? ` <a class="small" href="#/job/${n.job_id}">işe git</a>` : ""}</span>
+        ${n.status === "done" ? `<button class="ghost small" data-a="reopen" title="Tekrar aç: yeniden ajana gönderilebilir" aria-label="Tekrar aç">↺</button>` : ""}
         <button class="ghost small" data-a="edit" title="Düzenle" aria-label="Düzenle">✎</button><button class="ghost small" data-a="del" title="Sil" aria-label="Sil">✕</button></li>`);
       $("[data-a=edit]", li).onclick = async () => { const t = prompt("Notu düzenle", n.text); if (t && t.trim()) { await api(`/api/notes/${n.id}/update`, { body: { text: t } }); refresh(); } };
+      const ro = $("[data-a=reopen]", li); if (ro) ro.onclick = async () => { await api(`/api/notes/${n.id}/reopen`, { body: {} }); toast("Not yeniden açıldı", 1400); refresh(); };
       $("[data-a=del]", li).onclick = async () => { if (confirm("Not silinsin mi?")) { await api(`/api/notes/${n.id}/delete`, { body: {} }); refresh(); } };
       ul.append(li);
     });

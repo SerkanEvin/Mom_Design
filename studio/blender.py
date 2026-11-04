@@ -54,7 +54,9 @@ def _anchor(a):
 PRIMS = {"cube", "cylinder", "sphere", "cone", "torus"}
 
 
-def validate_ops(ops, internal: bool = False) -> list[dict]:
+def validate_ops(ops, internal: bool = False, pins: dict | None = None) -> list[dict]:
+    """`pins` ({note number: [x, y, z] mm}) enables {"op": "erase_note", "note": n, "radius_mm": r}: the eraser
+    at the exact spot the user pinned (becomes erase_sphere)."""
     if not isinstance(ops, list) or len(ops) > MAX_OPS:
         raise BlenderError(f"en fazla {MAX_OPS} işlem")
     out = []
@@ -63,7 +65,16 @@ def validate_ops(ops, internal: bool = False) -> list[dict]:
         if not isinstance(o, dict):
             raise BlenderError("işlem nesne olmalı")
         op = o.get("op")
-        if op == "scale":
+        if op == "erase_note":
+            try:
+                n = int(o.get("note"))
+            except (TypeError, ValueError):
+                raise BlenderError("erase_note: note numarası gerekli")
+            if not pins or n not in pins:
+                raise BlenderError(f"erase_note: {n} numaralı notun işaretli yeri yok (ya da model taşındı)")
+            out.append({"op": "erase_sphere", "center_mm": [round(float(x), 3) for x in pins[n]],
+                        "radius_mm": _num(o.get("radius_mm", 4), 1, 25, "radius_mm"), "note": n})
+        elif op == "scale":
             out.append({"op": op, "factor": _vec(o.get("factor"), 0.05, 20, "factor")})
         elif op == "rotate":
             out.append({"op": op, "degrees": _vec(o.get("degrees"), -360, 360, "degrees")})
@@ -249,7 +260,10 @@ You get 4 renders (FRONT looks along +Y, RIGHT looks along -X, BACK looks along 
 0..100 grid: u goes left->right, v goes top->bottom. To place something ON the surface, give an anchor
 {"view": "front", "u": 50, "v": 30} pointing at the exact spot in that image; the program finds the real surface.
 
-Operations (prefer the first three; the program computes their geometry, you only give parameters):
+Operations (prefer the first ones; the program computes their geometry, you only give parameters):
+- {"op":"erase_note","note":2,"radius_mm":4}  erase material in a ball around the exact spot of the user's note
+  pin n (only for pinned notes; radius = about half the size of the thing to remove). Use it whenever a note
+  says something at its pin should be removed. Never cut a cube/cylinder into the figure to remove something.
 - {"op":"add_base","shape":"round|square","height_mm":4,"margin_mm":4}  base sized from the figure's feet,
   joined under it and dropped on the bed. If a name goes on the base, height_mm >= size_mm + 3.
 - {"op":"base_text","text":"...","size_mm":5,"depth_mm":1}  name on the FRONT side of the base (needs a base,
@@ -278,26 +292,58 @@ Placement rules:
 - Text on the SIDE of a base needs a base at least size_mm + 3 mm tall (e.g. 8-10 mm for 5 mm text); otherwise
   put it on the base's top surface in front of the figure (anchor on the TOP view) or on a flat body area.
 - A base is a cylinder/cube unioned under the figure that overlaps the feet by ~1 mm, then drop_to_bed.
-Rules: operations already applied are permanent; NEVER repeat them (see rounds_so_far). If an op failed, read
-its error and fix that op only. Only do what the request asks. Keep the figure's details.
+Rules:
+- LOOK at the renders before planning: they show the model as it is NOW, including everything earlier rounds
+  added. Never add something that is already visible (a base, a text, a symbol). "rounds_so_far" lists what was
+  applied; a round marked "rejected" was undone (the model does not contain it) and says why it was bad: do it
+  differently or not at all.
+- If the model already stands on a base/plinth, never add another base. Never scale, rotate, mirror or move the
+  whole model unless the request literally asks for it.
+- Text uses a normal font: put each word or symbol ONCE, in one emboss_text.
+- If an op failed, read its error and fix that op only. Only do what the request asks. Keep the figure's details.
+- If something in the request is impossible with these operations (e.g. reshaping or resizing one body part,
+  changing a printed picture/colours), do not fake it with other ops: leave it out and say so in explanation_tr.
 Return JSON {"ops": [...], "explanation_tr": one short Turkish sentence}."""
 
-CHECK_SYSTEM = """You check an edited 3D figure against the user's request. You get the request, the operations
-already applied, and 4 renders of the result (FRONT, RIGHT, BACK, TOP with a 0..100 grid). For each part of the
-request decide if it is done and visible in the right place. Be concrete.
-Return JSON {"done": bool (true only if every part is satisfied), "missing": [short English items still to do,
-with where], "summary_tr": one short Turkish sentence for the user}."""
+CHECK_SYSTEM = """You review ONE editing round of a 3D figure. You get the request, the operations of this round,
+and BEFORE and AFTER renders of the same views (0..100 grid), plus close-ups around the user's numbered notes
+when available. First compare BEFORE and AFTER carefully and describe what actually changed. Then judge:
+- verdict "good": the change does what the request asked, in the right place, and damaged nothing;
+- verdict "bad": it made the model worse than BEFORE: wrong place, holes or box-shaped cuts in the figure, broken
+  or missing parts, something added twice or duplicated, wrong or extra symbols/letters, a second base;
+- verdict "no_change": nothing visible changed.
+- done: true only if EVERY part of the request is satisfied in AFTER.
+Return JSON {"changed": short English description of the difference, "verdict": "good"|"bad"|"no_change",
+"problems": [short English items, what is wrong and where], "done": bool, "missing": [short English items
+still to do, with where], "missing_tr": [the same in short, simple Turkish], "summary_tr": one short Turkish
+sentence for the user}"""
+
+
+def _accepted(history: list[dict]) -> list[dict]:
+    """Rounds whose changes are in the model now (not failed, not rolled back)."""
+    return [h for h in history if not h.get("rejected") and not h.get("failed")]
 
 
 def _drop_repeats(ops: list[dict], history: list[dict], j: Job) -> list[dict]:
-    """The planner sometimes re-adds a base or re-embosses the same text; never apply those twice."""
-    done_texts = {o["text"].lower() for h in history for o in h["ops"] if o["op"] in ("emboss_text", "base_text")}
-    has_base = any(o["op"] == "add_base" for h in history for o in h["ops"])
+    """Never apply twice what is already on the model: the same text, a second base, or new text/symbols right
+    where earlier text was embossed (the planner tends to "redo" a symbol next to the first one)."""
+    done = [o for h in _accepted(history) for o in h["ops"]]
+    done_texts = {o["text"].lower() for o in done if o["op"] in ("emboss_text", "base_text")}
+    done_chars = {c for t in done_texts for c in t if not c.isspace()}
+    spots = [(o["anchor"]["view"], o["anchor"]["u"], o["anchor"]["v"]) for o in done
+             if o["op"] == "emboss_text" and o.get("anchor")]
+    has_base = any(o["op"] == "add_base" for o in done)
     out = []
     for o in ops:
-        if o["op"] in ("emboss_text", "base_text") and o["text"].lower() in done_texts:
-            j.log(f"Tekrarlanan yazı atlandı: {o['text']}")
-            continue
+        if o["op"] in ("emboss_text", "base_text"):
+            t = o["text"].lower()
+            chars = {c for c in t if not c.isspace()}
+            near = o["op"] == "emboss_text" and any(
+                v == o["anchor"]["view"] and abs(u - o["anchor"]["u"]) < 15 and abs(w - o["anchor"]["v"]) < 10
+                for v, u, w in spots)
+            if t in done_texts or (near and chars and chars <= done_chars):
+                j.log(f"Tekrarlanan yazı atlandı: {o['text']}")
+                continue
         if o["op"] == "add_base" and has_base:
             j.log("İkinci taban eklenmedi")
             continue
@@ -318,11 +364,88 @@ def _erase_ops(j: Job, version_file: Path, up: str, height: float) -> list[dict]
         validate_ops(ops[:MAX_OPS - 1], internal=True) + validate_ops(ops[-1:], internal=True)
 
 
+def note_pins(notes: list[dict], version_file: Path, up: str, height: float):
+    """Pinned notes -> [{n, mm}] in the print frame + the version mesh there (for visibility tests)."""
+    pinned = [n for n in notes or [] if n.get("p")]
+    if not pinned:
+        return [], None
+    pts, mesh = to_print_mm(version_file, up, height, [n["p"] for n in pinned])
+    return [{"n": n["n"], "mm": p.round(2).tolist()} for n, p in zip(pinned, pts)], mesh
+
+
+def start_edit(j: Job, path: Path, height: float) -> None:
+    """First Blender run: the model scaled into the print frame, coloured, rendered (ctx current/renders)."""
+    if "current" in j.ctx:
+        return
+    work = j.dir
+    j.state("MULTI_MODAL_ANALYSIS", "Model inceleniyor")
+    first = run_blender({"input": str(path), "height_mm": height, "ops": [],
+                         "render_dir": str(work / "r0"), "output": str(work / "start.glb")}, work)
+    # start.glb is the model scaled to the print frame; colour it from its own reference copy
+    meshio.transfer_colors(work / "start.ref.glb", work / "start.glb", work / "cur0.glb")
+    j.ctx.update({"current": str(work / "cur0.glb"), "renders": first["renders"], "stats": first["stats"],
+                  "frame": first.get("frame"), "history": [], "missing": None})
+    j.save()
+
+
+DETAIL_ORDER = ("front", "right", "back", "top")
+
+
+def _details(renders: list[str], marks: dict, workdir: Path, tag: str, limit: int = 3) -> list[tuple[int, str, Path]]:
+    """Close-ups (x2.5) around each pinned note, from the first view where it is visible."""
+    by_view = {Path(p).stem: Path(p) for p in renders}
+    out = []
+    seen = set()
+    for view in DETAIL_ORDER:
+        for m in marks.get(view, []):
+            if m["n"] in seen or view not in by_view or len(out) >= limit:
+                continue
+            seen.add(m["n"])
+            im = Image.open(by_view[view]).convert("RGB")
+            w, h = im.size
+            half = 0.14
+            box = (max(0, (m["u"] / 100 - half) * w), max(0, (m["v"] / 100 - half) * h),
+                   min(w, (m["u"] / 100 + half) * w), min(h, (m["v"] / 100 + half) * h))
+            crop = im.crop(tuple(int(x) for x in box))
+            crop = crop.resize((int(crop.width * 2.5), int(crop.height * 2.5)), Image.LANCZOS)
+            dst = workdir / f"{tag}_note{m['n']}_{view}.png"
+            crop.save(dst)
+            out.append((m["n"], view, dst))
+    return out
+
+
+def _review(j: Job, directive: str, note_list: list, ops: list, before: list[str], after: list[str],
+            marks: dict, rnd: int) -> dict:
+    """BEFORE vs AFTER review of one round. Returns {} when the reviewer could not answer."""
+    work = j.dir
+    content: list = []
+    for b, a in zip(before, after):
+        view = Path(a).stem
+        content.append({"type": "text", "text": f"{view.upper()} BEFORE:"})
+        content.append(llm.image_block(grid_overlay(Path(b), work / f"c{rnd}_{view}_before.png", view, marks.get(view)), 384))
+        content.append({"type": "text", "text": f"{view.upper()} AFTER:"})
+        content.append(llm.image_block(grid_overlay(Path(a), work / f"c{rnd}_{view}_grid.png", view, marks.get(view)), 384))
+    db_, da_ = _details(before, marks, work, f"c{rnd}b"), _details(after, marks, work, f"c{rnd}a")
+    for (n, view, pb), (_, _, pa) in zip(db_, da_):
+        content.append({"type": "text", "text": f"Close-up around note {n} ({view.upper()}), BEFORE then AFTER:"})
+        content.append(llm.image_block(pb, 384))
+        content.append(llm.image_block(pa, 384))
+    content.append({"type": "text", "text": json.dumps({"request": directive, "notes": note_list,
+                                                         "this_round_ops": ops}, ensure_ascii=False)})
+    try:
+        out = llm.chat_json(CHECK_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=4000)
+        return out if isinstance(out, dict) else {}
+    except llm.LLMError as e:
+        j.log(f"Kontrol yapılamadı ({e})")
+        return {}
+
+
 def edit_loop(j: Job, *, version_id: str | None = None, directive: str | None = None,
               height: float | None = None, notes: list[dict] | None = None, eff: dict | None = None,
               source: str = "mod03") -> None:
-    """Plan -> Blender -> check rounds. `notes` are the user's notes ({n, text, p: glTF point | None});
-    pinned ones are drawn on the renders the planner sees. Values default to the job's own input."""
+    """Plan -> Blender -> review rounds. Every round is compared BEFORE vs AFTER; a round that made the model
+    worse is rolled back and the planner is told why. `notes` are the user's notes ({n, text, p: glTF point |
+    None}); pinned ones are drawn on the renders and can be erased exactly with erase_note."""
     directive = ((j.input.get("directive") or "") if directive is None else directive).strip()
     notes = notes or []
     if not directive and not j.input.get("erase") and not notes:
@@ -335,22 +458,9 @@ def edit_loop(j: Job, *, version_id: str | None = None, directive: str | None = 
     work = j.dir
     about = meta.get("spec", {}).get("description") or meta.get("prompt") or ""
 
-    pins, pin_mesh = [], None
-    pinned = [n for n in notes if n.get("p")]
-    if pinned:
-        pts, pin_mesh = to_print_mm(path, meta.get("up", "y"), height, [n["p"] for n in pinned])
-        pins = [{"n": n["n"], "mm": p.round(2).tolist()} for n, p in zip(pinned, pts)]
+    pins, pin_mesh = note_pins(notes, path, meta.get("up", "y"), height)
     note_list = [{"n": n["n"], "text": n["text"], "pinned": bool(n.get("p"))} for n in notes]
-
-    if "current" not in j.ctx:
-        j.state("MULTI_MODAL_ANALYSIS", "Model inceleniyor")
-        first = run_blender({"input": str(path), "height_mm": height, "ops": [],
-                             "render_dir": str(work / "r0"), "output": str(work / "start.glb")}, work)
-        # start.glb is the model scaled to the print frame; colour it from its own reference copy
-        meshio.transfer_colors(work / "start.ref.glb", work / "start.glb", work / "cur0.glb")
-        j.ctx.update({"current": str(work / "cur0.glb"), "renders": first["renders"], "stats": first["stats"],
-                      "frame": first.get("frame"), "history": [], "missing": None})
-        j.save()
+    start_edit(j, path, height)
 
     history = j.ctx["history"]
     if j.input.get("erase") and not j.ctx.get("erased"):
@@ -366,42 +476,55 @@ def edit_loop(j: Job, *, version_id: str | None = None, directive: str | None = 
         j.ctx.update({"current": str(work / "cur_e.glb"), "renders": res["renders"], "stats": res["stats"],
                       "frame": res.get("frame") or j.ctx.get("frame"), "changed": True, "erased": True})
         j.save()
+
+    def pin_state():
+        # pins belong to the model as it came in; once something moved it, they are given as text only
+        moved = any(o["op"] in MOVING_OPS for h in _accepted(history) for o in h["ops"])
+        if not pins or moved or not j.ctx.get("frame"):
+            return {}, {}
+        return project_pins(pins, j.ctx["frame"], pin_mesh), {p["n"]: p["mm"] for p in pins}
+
     while (directive or notes) and len(history) < max_rounds + (1 if j.ctx.get("erased") else 0):
         rnd = len(history)
         j.state("MULTI_MODAL_ANALYSIS", f"Plan hazırlanıyor (tur {rnd + 1}/{max_rounds})")
-        # pins belong to the model as it came in; once something moved it, they are given as text only
-        moved = any(o["op"] in MOVING_OPS for h in history for o in h["ops"])
-        marks = project_pins(pins, j.ctx["frame"], pin_mesh) if pins and j.ctx.get("frame") and not moved else {}
+        marks, pin_mm = pin_state()
         content = _views_content(j.ctx["renders"], work, f"p{rnd}", marks)
         where = {p["n"]: {v: {"u": m["u"], "v": m["v"]} for v, ms in marks.items() for m in ms if m["n"] == p["n"]}
                  for p in pins}
         content.append({"type": "text", "text": json.dumps({
             "request": directive, "model": about, "stats_mm": j.ctx["stats"],
-            "notes": [{**n, "visible_at": where.get(n["n"], {})} for n in note_list],
+            "notes": [{**n, "visible_at": where.get(n["n"], {}),
+                       "erase_note_available": n["n"] in pin_mm} for n in note_list],
             "careful": "Extra effort: before answering, re-check every anchor against the images and every size "
                        "against stats_mm." if eff.get("careful") else None,
-            "rounds_so_far": [{"applied_ops": h["ops"], "note": h.get("note"),
+            "rounds_so_far": [{"applied_ops": [] if h.get("rejected") else h["ops"],
+                               "rejected": h.get("rejected", False), "rejected_ops": h["ops"] if h.get("rejected") else [],
+                               "why_rejected": h.get("problems", []), "note": h.get("note"),
                                "failed_ops": h.get("failed_ops", []), "runner_notes": h.get("notes", [])}
                               for h in history],
             "still_missing": j.ctx.get("missing")}, ensure_ascii=False)})
-        plan = llm.chat_json(PLANNER_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=3000)
+        plan = llm.chat_json(PLANNER_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=6000)
         try:
-            ops = _drop_repeats(validate_ops(plan.get("ops") or []), history, j)
+            ops = _drop_repeats(validate_ops(plan.get("ops") or [], pins=pin_mm), history, j)
         except BlenderError as e:
-            history.append({"ops": [], "note": f"geçersiz plan: {e}"})
+            history.append({"ops": [], "note": f"geçersiz plan: {e}", "failed": True})
             j.log(f"Plan reddedildi: {e}")
             j.save()
             continue
         if not ops:
+            if plan.get("explanation_tr"):
+                j.ctx["last_word"] = str(plan["explanation_tr"])
             j.log("Yapılacak başka işlem yok.")
             break
+        if any(o["op"] == "erase_sphere" for o in ops) and not any(o["op"] == "remove_loose_parts" for o in ops) \
+                and len(ops) < MAX_OPS:
+            ops.append({"op": "remove_loose_parts", "min_fraction": 0.02})
 
         j.state("MCP_EXECUTION", plan.get("explanation_tr") or "Blender'da uygulanıyor")
         out_glb = work / f"edit_{rnd}.glb"
         try:
             res = run_blender({"input": j.ctx["current"], "height_mm": None, "ops": ops,
                                "render_dir": str(work / f"r{rnd + 1}"), "output": str(out_glb)}, work)
-            j.ctx["frame"] = res.get("frame") or j.ctx.get("frame")
         except BlenderError as e:
             history.append({"ops": ops, "note": f"uygulanamadı: {e}", "failed": True})
             j.log(f"Bu adım uygulanamadı: {e}")
@@ -419,38 +542,48 @@ def edit_loop(j: Job, *, version_id: str | None = None, directive: str | None = 
             continue
         colored = work / f"cur{rnd + 1}.glb"
         tr = meshio.transfer_colors(Path(res["ref"]), out_glb, colored, own_colors=res.get("own_colors", False))
-        history.append({"ops": applied, "note": plan.get("explanation_tr"), "stats": res["stats"], "colours": tr,
-                        "failed_ops": failed, "notes": res.get("notes", [])})
-        j.ctx.update({"current": str(colored), "renders": res["renders"], "stats": res["stats"], "changed": True})
-        j.save()
 
-        j.state("REVIEW", "Sonuç kontrol ediliyor")
-        check = {}
-        try:
-            content = _views_content(res["renders"], work, f"c{rnd}")
-            content.append({"type": "text", "text": json.dumps({"request": directive, "notes": note_list,
-                                                                 "applied": [h["ops"] for h in history]},
-                                                                ensure_ascii=False)})
-            check = llm.chat_json(CHECK_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=1500)
-        except llm.LLMError as e:
-            j.log(f"Kontrol yapılamadı ({e})")
+        j.state("REVIEW", "Sonuç önceki hâliyle karşılaştırılıyor")
+        moved_now = any(o["op"] in MOVING_OPS for o in applied)     # pins no longer line up in AFTER
+        check = _review(j, directive, note_list, applied, j.ctx["renders"], res["renders"],
+                        {} if moved_now else marks, rnd)
+        entry = {"ops": applied, "note": plan.get("explanation_tr"), "stats": res["stats"], "colours": tr,
+                 "failed_ops": failed, "notes": res.get("notes", []), "changed": check.get("changed"),
+                 "verdict": check.get("verdict")}
+        if check.get("verdict") == "bad":
+            # undo: keep the model, renders and frame from before this round
+            entry.update(rejected=True, problems=[str(p) for p in (check.get("problems") or [])][:6])
+            history.append(entry)
+            j.log("Bu adım modeli bozdu, geri alındı: " + "; ".join(entry["problems"])[:300])
+            j.save()
+            continue
+        history.append(entry)
+        j.ctx.update({"current": str(colored), "renders": res["renders"], "stats": res["stats"],
+                      "frame": res.get("frame") or j.ctx.get("frame"), "changed": True,
+                      "missing": check.get("missing"), "missing_tr": check.get("missing_tr") or [],
+                      "reviewed_done": bool(check.get("done"))})
         if check.get("summary_tr"):
             j.log(check["summary_tr"])
-        j.ctx["missing"] = check.get("missing")
         j.save()
-        if check.get("done", True):
+        if check.get("done"):
             break
 
     if not j.ctx.get("changed"):
-        raise JobFailed("Model değiştirilemedi. İsteği daha basit adımlarla yazmayı dene.")
+        reasons = [p for h in history for p in h.get("problems", [])] or [h.get("note") for h in history if h.get("note")]
+        raise JobFailed("Model değiştirilemedi" + (": " + "; ".join(map(str, reasons))[:300] if reasons else
+                                                 ". İsteği daha basit adımlarla yazmayı dene."))
     j.state("VERSIONING_AND_RENDER", "Yeni sürüm kaydediliyor")
     for p in j.ctx["renders"]:
         shutil.copyfile(p, work / f"final_{Path(p).stem}.png")
     final = Path(j.ctx["current"])
+    kept = _accepted(history)
     j.version_id = add_version(j.asset_id, source, final,
                                {"up": "y", "directive": directive, "units": "mm", "height_mm": height,
                                 "effort": eff["name"], "notes": [n["text"] for n in notes],
-                                "ops": [h["ops"] for h in history]}, parent_id=ver["id"])
+                                "ops": [h["ops"] for h in kept]}, parent_id=ver["id"])
+    missing_tr = [] if j.ctx.get("reviewed_done") else [str(x) for x in (j.ctx.get("missing_tr") or [])][:6]
     j.ctx["result"] = {"asset_id": j.asset_id, "version_id": j.version_id,
-                       "notes": [h.get("note") for h in history if h.get("note")]}
+                       "notes": [h.get("note") for h in kept if h.get("note")],
+                       "undone": sum(1 for h in history if h.get("rejected")),
+                       "missing_tr": missing_tr, "last_word": j.ctx.get("last_word")}
     j.save()

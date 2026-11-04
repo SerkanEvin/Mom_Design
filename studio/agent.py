@@ -40,12 +40,24 @@ Always also return: "praise_tr", "question_tr": null or one short question, "opt
 "plan_tr": 1-2 sentences in plain Turkish saying what you will make (shape, size in cm, colours)."""
 
 MODEL_PLAN_SYSTEM = BEGINNER_RULES + TALK_RULES + """
-You are her design assistant. She left numbered notes on a 3D model (some are pinned to a spot on it). Turn them
-into ONE clear editing request for a Blender operator who sees the model and the numbered pins. Keep her intent
-and words; add only what makes it printable (e.g. a base). Do not invent unrelated changes.
-Return JSON {"directive": English editing request that refers to notes by number ("at pin 2 ..."),
-"height_mm": final model height in mm, "colors": 1..4, "explanation_tr": 1-2 simple Turkish sentences telling
-her what you will do, "tips_tr": [2-4 short Turkish print tips for this object]}."""
+You are her design assistant. She left numbered notes on a 3D model; pinned notes are drawn on the 4 renders
+(FRONT, RIGHT, BACK, TOP, 0..100 grid) as numbered magenta circles. LOOK at the renders first: what is at each
+pin, and does the model already stand on a base/plinth?
+Then turn her notes into ONE clear editing request for a Blender operator who sees the same renders and pins.
+Keep her intent and words; do not invent unrelated changes. Never ask for a base when the model already has one,
+and never ask to scale, rotate or move the whole model unless she asked for that.
+What the operator CAN do: erase material at a pinned spot ("erase at pin 2, radius about 4 mm"; radius = about
+half the size of the thing to remove), raised or engraved text and simple symbols, holes, add or cut simple shapes
+(cube, cylinder, sphere, cone, torus), a base with a name, smoothing, removing floating bits.
+What it CANNOT do: reshape or resize one body part (e.g. make one foot smaller), change the printed colours or
+picture on the surface (e.g. redraw the flag's printed crescent), redraw a face. Do not fake those with other
+operations. List them in "cant_do_tr" in kind, simple Turkish and say what would help instead (for example a new
+photo of the original object); never mention screens or tools the app does not have (she only has notes, the
+eraser and sending to you).
+Return JSON {"seen": short English description of what is at each pin and whether there is a base,
+"directive": English editing request that refers to notes by number ("at pin 2 ...") or "" if nothing is
+possible, "cant_do_tr": [..], "colors": 1..4, "explanation_tr": 1-2 simple Turkish sentences telling her what you
+will do, "tips_tr": [2-4 short Turkish print tips for this object]}."""
 
 DRAWING_PLAN_SYSTEM = BEGINNER_RULES + TALK_RULES + """
 You are her design assistant. She made a 2D drawing (or photographed one) and left numbered notes; pins are
@@ -186,38 +198,55 @@ def _finish(j: Job, plan: dict, height: float, colors: int) -> None:
                        "route": plan.get("route", "edit"), "explanation_tr": plan.get("explanation_tr"),
                        "praise_tr": plan.get("praise_tr"),
                        "tips_tr": [str(t) for t in (plan.get("tips_tr") or [])][:5],
-                       "notes": j.ctx.get("result_notes", [])}
+                       "cant_do_tr": [str(x) for x in (plan.get("cant_do_tr") or [])][:5]}
+    er = j.ctx.get("edit_result") or {}
+    j.ctx["result"].update({"notes": er.get("notes") or [], "missing_tr": er.get("missing_tr") or [],
+                            "undone": er.get("undone") or 0})
     j.save()
 
 
 # ------------------------------------------------------------------ model target
+
+EDIT_PRINT_RULES = ("Print rules: keep every new part at least 1.5 mm thick and text at least 5 mm tall. Do not add "
+                    "a base if the model already has one; do not scale, rotate or move the whole model.")
+
 
 def _run_model(j: Job, eff: dict) -> None:
     from . import blender
     from .jobs import blender_lock, version_path
     notes = j.input.get("notes", [])
     path, ver, meta = version_path(j.input["version_id"])
+    height = _clamp(j.input.get("height_mm") or meta.get("height_mm"), 5, 250, 80)
+    with blender_lock():                      # the plan is made while LOOKING at the model and the pins
+        blender.start_edit(j, path, height)
+
     def make_plan() -> dict:
-        j.state("AGENT_PLAN", "Notların okunuyor, plan yapılıyor")
+        j.state("AGENT_PLAN", "Notların ve model inceleniyor, plan yapılıyor")
+        pins, mesh = blender.note_pins(notes, path, meta.get("up", "y"), height)
+        marks = blender.project_pins(pins, j.ctx["frame"], mesh) if pins and j.ctx.get("frame") else {}
         info = {"model": meta.get("spec", {}).get("description") or meta.get("prompt") or "", "name":
                 db.row("SELECT name FROM assets WHERE id=?", ver["asset_id"])["name"],
-                "current_height_mm": meta.get("height_mm"), "requested_height_mm": j.input.get("height_mm")}
-        plan = llm.chat_json(MODEL_PLAN_SYSTEM, _notes_text(notes, j.input.get("extra", "")) + "\n"
-                             + json.dumps(info, ensure_ascii=False) + _dialog_text(j), user_id=j.user_id,
-                             max_tokens=1500)
-        if not isinstance(plan, dict) or not (str(plan.get("directive", "")).strip() or plan.get("question_tr")):
+                "height_mm": height, "size_mm": j.ctx.get("stats", {}).get("size_mm")}
+        content = blender._views_content(j.ctx["renders"], j.dir, "plan", marks)
+        content.append({"type": "text", "text": _notes_text(notes, j.input.get("extra", "")) + "\n"
+                        + json.dumps(info, ensure_ascii=False) + _dialog_text(j)})
+        plan = llm.chat_json(MODEL_PLAN_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=4000)
+        if not isinstance(plan, dict) or not (str(plan.get("directive", "")).strip() or plan.get("question_tr")
+                                              or plan.get("cant_do_tr")):
             raise JobFailed("Ajan notlardan bir plan çıkaramadı; notları biraz daha açık yaz.")
         return plan
     plan = _settle_plan(j, make_plan, lambda p: 0.0)
+    cant = [str(x) for x in (plan.get("cant_do_tr") or [])][:5]
     if not str(plan.get("directive", "")).strip():
-        raise JobFailed("Ajan notlardan bir plan çıkaramadı; notları biraz daha açık yaz.")
-    height = _clamp(j.input.get("height_mm") or plan.get("height_mm") or meta.get("height_mm"), 5, 250, 80)
-    directive = str(plan["directive"]) + "\nBeginner print rules: " + BEGINNER_RULES
+        raise JobFailed("Bu notları şu an yapamıyorum: " + " ".join(cant) if cant else
+                        "Ajan notlardan bir plan çıkaramadı; notları biraz daha açık yaz.")
+    directive = str(plan["directive"]) + "\n" + EDIT_PRINT_RULES
     with blender_lock():
         if not j.ctx.get("edited"):
             blender.edit_loop(j, version_id=ver["id"], directive=directive, height=height, notes=notes, eff=eff,
                               source="agent")
-            j.ctx["result_notes"] = (j.ctx.get("result") or {}).get("notes", [])
+            r = j.ctx.get("result") or {}
+            j.ctx["edit_result"] = {k: r.get(k) for k in ("notes", "missing_tr", "undone", "last_word")}
             j.ctx["edited"] = True
             j.save()
     _finish(j, plan, height, int(_clamp(plan.get("colors"), 1, 4, 3)))

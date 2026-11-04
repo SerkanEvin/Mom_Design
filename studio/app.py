@@ -620,6 +620,14 @@ async def update_note(note_id: str, req: Request, u=Depends(current_user)):
     return _note_json(db.row("SELECT * FROM notes WHERE id=?", n["id"]))
 
 
+@app.post("/api/notes/{note_id}/reopen")
+def reopen_note(note_id: str, u=Depends(current_user)):
+    """A done note can be sent to the agent again (e.g. when the result was not right)."""
+    n = _note_for(u, note_id)
+    db.execute("UPDATE notes SET status='open', job_id=NULL, updated_at=? WHERE id=?", db.now(), n["id"])
+    return _note_json(db.row("SELECT * FROM notes WHERE id=?", n["id"]))
+
+
 @app.post("/api/notes/{note_id}/delete")
 def delete_note(note_id: str, u=Depends(current_user)):
     n = _note_for(u, note_id)

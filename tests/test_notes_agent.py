@@ -44,8 +44,9 @@ def agent_llm(route, seen):
                     "explanation_tr": "Taban ekleyip yazıyı yazacağım.", "tips_tr": ["Tabanı tablaya koy."]}
         if "edit a 3D-printable figure" in system:
             return {"ops": [{"op": "add_base", "shape": "round", "height_mm": 4}], "explanation_tr": "Taban."}
-        if "check an edited 3D figure" in system:
-            return {"done": False, "missing": ["text"], "summary_tr": "Yazı eksik."}
+        if "review ONE editing round" in system:
+            return {"verdict": "good", "done": False, "missing": ["text"], "missing_tr": ["Yazı eksik."],
+                    "summary_tr": "Yazı eksik."}
         return fake_llm(system, content, **kw)
     return f
 
@@ -361,3 +362,197 @@ def test_cancel_waiting_reopens_notes(client, users, monkeypatch, tmp_path):
     assert client.post(f"/api/jobs/{jid}/cancel", json={}, headers=H).status_code == 200
     assert client.get(f"/api/jobs/{jid}").json()["status"] == "cancelled"
     assert client.get(f"/api/drawings/{did}").json()["notes"][0]["status"] == "open"
+
+
+
+# ------------------------------------------------------------------ edit loop: review, rollback, repeats, honesty
+
+def scripted(plans, checks, seen):
+    """Planner answers `plans` in order, reviewer answers `checks` in order; records what each one saw."""
+    plans, checks = list(plans), list(checks)
+
+    def chat(system, content, **kw):
+        if "edit a 3D-printable figure" in system:
+            seen.append(("plan", content))
+            return plans.pop(0) if plans else {"ops": [], "explanation_tr": "Bitti."}
+        if "review ONE editing round" in system:
+            seen.append(("check", content))
+            return checks.pop(0) if checks else {"verdict": "good", "done": True}
+        return {"summary": "ok", "tips": []}
+    return chat
+
+
+def edit_job(users, tmp_path, inp):
+    from studio import db, jobs
+    p = tmp_path / "m.glb"
+    two_colour_glb(p)
+    aid = jobs.create_asset(users["asli"][0], "x", "upload")
+    vid = jobs.add_version(aid, "upload", p, {"up": "y"})
+    jid = jobs.create_job(users["asli"][0], "edit", {"version_id": vid, "effort": "high", **inp})
+    db.execute("UPDATE jobs SET status='running' WHERE id=?", jid)
+    jobs.run_one(db.row("SELECT * FROM jobs WHERE id=?", jid))
+    r = db.row("SELECT * FROM jobs WHERE id=?", jid)
+    return r, json.loads(r["ctx"])
+
+
+TEXT = {"op": "emboss_text", "text": "☾ ★", "anchor": {"view": "front", "u": 51, "v": 32}, "size_mm": 8}
+
+
+def test_bad_round_is_rolled_back_and_planner_told(env, users, monkeypatch, tmp_path):
+    from studio import blender, llm
+    seen, bl = [], []
+    cut = {"op": "boolean_difference", "shape": "cube", "size_mm": [12, 14, 12],
+           "anchor": {"view": "right", "u": 55, "v": 57}, "depth_into_mm": 4}
+    monkeypatch.setattr(llm, "chat_json", scripted(
+        [{"ops": [cut]}, {"ops": [TEXT]}],
+        [{"verdict": "bad", "problems": ["box-shaped hole cut into the leg"], "done": False},
+         {"verdict": "good", "done": True, "summary_tr": "Tamam."}], seen))
+    monkeypatch.setattr(blender, "run_blender", fake_blender(bl))
+    r, ctx = edit_job(users, tmp_path, {"directive": "remove the bump and put a crescent and star on the flag"})
+    assert r["status"] == "done", r["error"]
+    h = ctx["history"]
+    assert h[0]["rejected"] and h[0]["problems"] == ["box-shaped hole cut into the leg"]
+    # round 2 started from the model BEFORE the bad cut, and the planner was told why it was undone
+    assert bl[2]["input"].endswith("cur0.glb")
+    info = json.loads(seen[2][1][-1]["text"])
+    assert info["rounds_so_far"][0]["rejected"] and info["rounds_so_far"][0]["applied_ops"] == []
+    assert info["rounds_so_far"][0]["why_rejected"] == ["box-shaped hole cut into the leg"]
+    assert ctx["current"].endswith("cur2.glb")
+    assert ctx["result"]["undone"] == 1
+    from studio import db
+    meta = json.loads(db.row("SELECT meta FROM versions WHERE id=?", ctx["result"]["version_id"])["meta"])
+    assert meta["ops"] == [h[1]["ops"]]          # the rolled-back cut is not recorded as applied
+
+
+def test_reviewer_sees_before_and_after(env, users, monkeypatch, tmp_path):
+    from studio import blender, llm
+    seen = []
+    monkeypatch.setattr(llm, "chat_json", scripted([{"ops": [TEXT]}], [{"verdict": "good", "done": True}], seen))
+    monkeypatch.setattr(blender, "run_blender", fake_blender([]))
+    edit_job(users, tmp_path, {"directive": "crescent and star on the flag"})
+    check = [c for k, c in seen if k == "check"][0]
+    labels = [b["text"] for b in check if b["type"] == "text"]
+    assert "FRONT BEFORE:" in labels and "FRONT AFTER:" in labels and "TOP AFTER:" in labels
+    assert sum(1 for b in check if b["type"] == "image") == 8
+
+
+def test_symbol_redone_next_to_itself_is_dropped(env, users, monkeypatch, tmp_path):
+    """The flag case: '☾ ★' then '☾' and '★' again beside it gave two crescents and two stars."""
+    from studio import blender, llm
+    seen, bl = [], []
+    again = [{"op": "emboss_text", "text": "☾", "anchor": {"view": "front", "u": 44, "v": 31}, "size_mm": 9},
+             {"op": "emboss_text", "text": "★", "anchor": {"view": "front", "u": 60, "v": 31}, "size_mm": 8}]
+    monkeypatch.setattr(llm, "chat_json", scripted([{"ops": [TEXT]}, {"ops": again}],
+                                                   [{"verdict": "good", "done": False, "missing": ["flag"]}], seen))
+    monkeypatch.setattr(blender, "run_blender", fake_blender(bl))
+    r, ctx = edit_job(users, tmp_path, {"directive": "crescent and star side by side on the flag"})
+    assert r["status"] == "done"
+    texts = [o["text"] for h in ctx["history"] for o in h["ops"] if o["op"] == "emboss_text"]
+    assert texts == ["☾ ★"]
+    assert len(bl) == 2                          # start render + one edit; the repeat never reached Blender
+    log = [x["m"] for x in json.loads(r["log"])]
+    assert any("Tekrarlanan yazı atlandı: ☾" in m for m in log)
+    # a different text near it, or the same symbol elsewhere, is still allowed
+    from studio.blender import _drop_repeats
+    from studio import jobs
+    j = jobs.Job(r)
+    ok = _drop_repeats([{"op": "emboss_text", "text": "ASLI", "anchor": {"view": "front", "u": 50, "v": 33}},
+                        {"op": "emboss_text", "text": "★", "anchor": {"view": "back", "u": 50, "v": 33}}],
+                       ctx["history"], j)
+    assert [o["text"] for o in ok] == ["ASLI", "★"]
+
+
+def test_missing_items_are_reported_when_rounds_run_out(env, users, monkeypatch, tmp_path):
+    from studio import blender, llm
+    smooth = {"ops": [{"op": "smooth", "iterations": 1}]}
+    monkeypatch.setattr(llm, "chat_json", scripted([smooth] * 3, [
+        {"verdict": "good", "done": False, "missing": ["one star too many"], "missing_tr": ["Bir yıldız fazla."]}] * 3, []))
+    monkeypatch.setattr(blender, "run_blender", fake_blender([]))
+    r, ctx = edit_job(users, tmp_path, {"directive": "fix the flag"})
+    assert r["status"] == "done"
+    assert ctx["result"]["missing_tr"] == ["Bir yıldız fazla."]
+
+
+def test_erase_note_hits_the_pin(env, users, monkeypatch, tmp_path):
+    from studio import blender, llm
+    seen, bl = [], []
+    monkeypatch.setattr(llm, "chat_json", scripted([{"ops": [{"op": "erase_note", "note": 1, "radius_mm": 3}]}],
+                                                   [{"verdict": "good", "done": True}], seen))
+    monkeypatch.setattr(blender, "run_blender", fake_blender(bl))
+    from studio import db, jobs
+    p = tmp_path / "m.glb"
+    two_colour_glb(p)
+    aid = jobs.create_asset(users["asli"][0], "x", "upload")
+    vid = jobs.add_version(aid, "upload", p, {"up": "y"})
+    jid = jobs.create_job(users["asli"][0], "edit", {"version_id": vid, "effort": "high"})
+    db.execute("UPDATE jobs SET status='running' WHERE id=?", jid)
+    j = jobs.Job(db.row("SELECT * FROM jobs WHERE id=?", jid))
+    blender.edit_loop(j, notes=[{"n": 1, "text": "burası silinmeli", "p": [0, 5, 20]}], height=64.0)
+    ops = bl[1]["ops"]
+    assert ops[0]["op"] == "erase_sphere" and ops[0]["radius_mm"] == 3
+    expect, _ = blender.to_print_mm(p, "y", 64.0, [[0, 5, 20]])
+    assert np.allclose(ops[0]["center_mm"], expect[0], atol=0.01)
+    assert ops[-1]["op"] == "remove_loose_parts"
+    info = json.loads(seen[0][1][-1]["text"])
+    assert info["notes"][0]["erase_note_available"]
+    import pytest as _pt
+    with _pt.raises(blender.BlenderError):
+        blender.validate_ops([{"op": "erase_note", "note": 2}], pins={1: [0, 0, 0]})
+
+
+def test_agent_plans_while_looking_and_reports_what_it_cannot_do(client, users, monkeypatch, tmp_path):
+    from studio import blender, jobs, llm
+    seen, bl = [], []
+
+    def chat(system, content, **kw):
+        seen.append((system, content))
+        if "left numbered notes on a 3D model" in system:
+            return {"seen": "pin 1 is the left foot; the model has a base", "directive": "",
+                    "cant_do_tr": ["Tek bir ayağı küçültemiyorum."], "praise_tr": "Ne güzel heykel!"}
+        return fake_llm(system, content, **kw)
+    monkeypatch.setattr(llm, "chat_json", chat)
+    monkeypatch.setattr(blender, "run_blender", fake_blender(bl))
+    login(client, users["asli"][1])
+    p = tmp_path / "m.glb"
+    two_colour_glb(p)
+    aid = jobs.create_asset(users["asli"][0], "Figür", "upload")
+    vid = jobs.add_version(aid, "upload", p, {"up": "y"})
+    client.post("/api/notes", json={"kind": "model", "version_id": vid, "text": "iki ayak eşit olsun", "pos": [0, 5, 20]},
+                headers=H)
+    jid = client.post("/api/agent", json={"version_id": vid}, headers=H).json()["id"]
+    run_queued()
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert j["status"] == "failed" and "Tek bir ayağı küçültemiyorum." in j["error"]
+    plan_content = seen[0][1]
+    assert isinstance(plan_content, list) and any(b["type"] == "image" for b in plan_content)   # it looked
+    assert client.get(f"/api/notes?asset_id={aid}").json()["notes"][0]["status"] == "open"
+
+
+def test_empty_answer_retries_with_more_room(env, monkeypatch):
+    from studio import llm
+    sent = []
+
+    class R:
+        def __init__(self, text):
+            self.status_code = 200
+            self._t = text
+
+        def json(self):
+            return {"content": [{"type": "text", "text": self._t}]}
+
+    def post(url, json=None, **kw):
+        sent.append(json["max_tokens"])
+        return R("" if len(sent) == 1 else "ok")
+    monkeypatch.setattr(llm.httpx, "post", post)
+    assert llm.chat("s", "hi", max_tokens=3000) == "ok"
+    assert sent == [3000, 6000]
+
+
+def test_done_note_can_be_reopened(client, users):
+    from studio import db
+    login(client, users["asli"][1])
+    did = make_drawing(client)
+    nid = client.post("/api/notes", json={"kind": "drawing", "drawing_id": did, "text": "x"}, headers=H).json()["id"]
+    db.execute("UPDATE notes SET status='done', job_id='job_x' WHERE id=?", nid)
+    r = client.post(f"/api/notes/{nid}/reopen", json={}, headers=H)
+    assert r.status_code == 200 and r.json()["status"] == "open" and r.json()["job_id"] is None

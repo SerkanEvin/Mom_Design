@@ -68,6 +68,8 @@ def chat(system: str, content: list | str, *, vision: bool = False, user_id: int
             if text.strip():
                 return text
             last = "empty answer"
+            # reasoning models can spend the whole budget before answering: give the next try more room
+            body["max_tokens"] = min(int(body["max_tokens"]) * 2, 16000)
             continue
         last = f"HTTP {r.status_code}"
         if r.status_code in (400, 401, 402, 403):
