@@ -228,14 +228,25 @@ def boolean(target, tool, operation):
             target.modifiers.remove(mod)
             continue
         snapshot = target.data.copy()
-        apply_mod(target, mod)
-        if len(target.data.polygons) > 0 and nonmanifold(target) == 0:
+        sig = (len(target.data.vertices), len(target.data.polygons))
+        try:
+            apply_mod(target, mod)
+            changed = (len(target.data.vertices), len(target.data.polygons)) != sig
+        except RuntimeError:
+            changed = False
+            if mod.name in target.modifiers:
+                target.modifiers.remove(mod)
+        if changed and len(target.data.polygons) > 0 and nonmanifold(target) == 0:
+            bpy.data.meshes.remove(snapshot)
             break
-        if solver == "MANIFOLD":   # undo and retry with the exact solver
+        if solver == "MANIFOLD":   # refused / not closed: undo and retry with the exact solver
             old = target.data
             target.data = snapshot
             bpy.data.meshes.remove(old)
         else:
+            bpy.data.meshes.remove(snapshot)
+            if not changed:
+                raise RuntimeError("boolean işlemi uygulanamadı (şekil modele değmiyor olabilir)")
             heal(target)
     if len(target.data.polygons) == 0:
         raise RuntimeError("boolean işlemi modeli sildi")
