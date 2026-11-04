@@ -278,6 +278,28 @@ at 390 px and 1280 px, one real end-to-end job per module with its cost shown in
 - `studio/web/` — Turkish, mobile-first page. three.js 0.160 is bundled locally.
 - aicp change (by `aicp-gelistirici`, commit `013e050`): `POST /hook/notify` on `10.0.1.1:7812` with a `notify`-only token, used by the studio for Serkan's notifications.
 
+### Added 2026-11-04 (later): notes, design agent, usage gauge, effort levels
+- **Notes** (`notes` table, `/api/notes*`): on a 3D model, “📝 Not al” + a tap pins a note to that spot (stored in
+  the version file's coordinates); on a 2D drawing a pin is `[u, v]` in 0..100. Pinless notes apply to the whole thing.
+- **Drawings** (`drawings` table, `/api/drawings*`, page `#/draw`, `#/d/<id>`): draw with a finger/pen or upload a
+  photo of a paper sketch, then add notes.
+- **Design agent** (`studio/agent.py`, job module `agent`, `POST /api/agent`): “🤖 Notları ajana gönder” sends the
+  open notes. Written for a beginner (P2S rules: flat bottom/base, ≥ 1.5 mm parts, ≥ 5 mm text, 40–100 mm).
+  - model → text plan → Blender edit loop; the numbered pins are drawn on the planner's renders with their u/v
+    (until an op moves the model, then they are passed as text).
+  - drawing → vision plan → **relief** (`studio/relief.py`: keychain with ring hole, plate, cookie cutter; voxel +
+    marching cubes, watertight, 2 colours, free) or **figure** (sketch → product photo with hidream → MOD-01).
+  - Every result is a new version, and a print check (MOD-04) is queued for it; the job page explains what was done
+    and gives print tips.
+- **Usage gauge** (header ring + popover, `usage` in `/api/me`): credit used/granted, AI calls this hour (members:
+  60/h), today's fal spend against the daily cap.
+- **Effort** Orta / Yüksek / Ekstra (`config.EFFORTS`; Yüksek = previous behaviour) on photo → 3D, Blender edit and
+  the agent: Blender rounds 2 / 3 / 5, view re-dos after QA 1 / 2 / 3, Ekstra also makes the top view, uses 2K
+  textures and asks the planner for a self-check.
+- Print check now accepts heights from 1 mm (flat reliefs are ~4 mm).
+
 ### Still to verify on real hardware
 - Open an exported painted 3MF in Bambu Studio and check that the colours appear on the right faces. The encoding follows PrusaSlicer's TriangleSelector format, which Bambu reads as `paint_color`. Fallback: the parts-mode STL zip.
 - First real fal run of each model, to compare actual cost with the estimates in `config.DEFAULT_PRICES`.
+- Design agent with real synthetic + Blender: the pin → render projection is unit-tested against Blender's camera
+  maths, but not yet seen by the real planner. Print one relief keychain to check the 4.2 mm plate and ring hole.

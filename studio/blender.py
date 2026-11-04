@@ -17,11 +17,10 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from . import llm, meshio
-from .config import get_settings
+from .config import effort, get_settings
 from .jobs import Job, JobFailed, add_version, version_path
 
 RUNNER = Path(__file__).with_name("blender_runner.py")
-MAX_ROUNDS = 3
 MAX_OPS = 10
 VIEWS = ("front", "right", "back", "top")
 
@@ -159,8 +158,9 @@ def run_blender(job: dict, workdir: Path, timeout_s: int = 420) -> dict:
     return out
 
 
-def grid_overlay(src: Path, dst: Path, view: str) -> Path:
-    """Label the render with a 0..100 grid so the planner can point at places (u right, v down)."""
+def grid_overlay(src: Path, dst: Path, view: str, marks: list[dict] | None = None) -> Path:
+    """Label the render with a 0..100 grid so the planner can point at places (u right, v down).
+    `marks` are the user's numbered note pins visible in this view ({n, u, v})."""
     im = Image.open(src).convert("RGB")
     w, h = im.size
     d = ImageDraw.Draw(im, "RGBA")
@@ -171,19 +171,76 @@ def grid_overlay(src: Path, dst: Path, view: str) -> Path:
         d.line([(0, y), (w, y)], fill=col, width=1)
         d.text((x + 2, 2), str(k), fill=(200, 30, 30, 255))
         d.text((2, y + 2), str(k), fill=(30, 30, 200, 255))
+    for m in marks or []:
+        x, y, r = w * m["u"] / 100, h * m["v"] / 100, max(7, w // 50)
+        d.ellipse([x - r, y - r, x + r, y + r], fill=(214, 40, 160, 210), outline=(255, 255, 255, 255), width=2)
+        d.text((x - 3 * len(str(m["n"])), y - 6), str(m["n"]), fill=(255, 255, 255, 255))
     d.text((w - 70, h - 14), view.upper(), fill=(0, 0, 0, 255))
     im.save(dst)
     return dst
 
 
-def _views_content(paths: list[str], workdir: Path, tag: str) -> list[dict]:
+def _views_content(paths: list[str], workdir: Path, tag: str, marks: dict | None = None) -> list[dict]:
     content = []
     for p in paths:
         view = Path(p).stem
-        g = grid_overlay(Path(p), workdir / f"{tag}_{view}_grid.png", view)
+        g = grid_overlay(Path(p), workdir / f"{tag}_{view}_grid.png", view, (marks or {}).get(view))
         content.append({"type": "text", "text": f"{view.upper()} view:"})
         content.append(llm.image_block(g, 448))
     return content
+
+
+# camera axes of each render, as in blender_runner.VIEWS (image right, image up, viewing direction)
+VIEW_AXES = {
+    "front": ((1, 0, 0), (0, 0, 1), (0, 1, 0)),
+    "right": ((0, 1, 0), (0, 0, 1), (-1, 0, 0)),
+    "back": ((-1, 0, 0), (0, 0, 1), (0, -1, 0)),
+    "top": ((1, 0, 0), (0, 1, 0), (0, 0, -1)),
+}
+
+
+MOVING_OPS = {"add_base", "scale", "rotate", "translate", "mirror", "drop_to_bed", "remesh_voxel"}
+
+
+def to_print_mm(version_file: Path, up: str, height: float, points) -> tuple[np.ndarray, "object"]:
+    """Viewer points (glTF coords of the version file) -> print-frame mm, same transform as Blender's normalise.
+    Also returns the version mesh in that frame (for visibility tests)."""
+    import trimesh
+    pts = np.asarray(points, dtype=float).reshape(-1, 3)
+    m = meshio.geometry_only(version_file)
+    v = m.vertices.copy()
+    if up == "y":
+        R = meshio.Y_TO_Z[:3, :3]
+        v, pts = v @ R.T, pts @ R.T
+    lo, hi = v.min(axis=0), v.max(axis=0)
+    s = height / (hi[2] - lo[2])
+    v, pts = v * s, pts * s
+    lo, hi = v.min(axis=0), v.max(axis=0)
+    off = np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]])
+    return pts + off, trimesh.Trimesh(v + off, m.faces, process=False)
+
+
+def project_pins(pins: list[dict], frame: dict, mesh=None) -> dict:
+    """Where each pin ({n, mm}) appears in each render (u, v in 0..100), keeping only views where it is not
+    hidden behind other surface. `frame` is the render framing {c, size} reported by the runner."""
+    c, size = np.asarray(frame["c"], dtype=float), float(frame["size"])
+    out: dict[str, list] = {}
+    for view, (right, upv, dirv) in VIEW_AXES.items():
+        right, upv, dirv = map(np.asarray, (right, upv, dirv))
+        for p in pins:
+            q = np.asarray(p["mm"], dtype=float) - c
+            u, v = (q @ right / size + 0.5) * 100, (0.5 - q @ upv / size) * 100
+            if not (0 <= u <= 100 and 0 <= v <= 100):
+                continue
+            if mesh is not None:
+                origin = np.asarray(p["mm"], dtype=float) - dirv * size * 2
+                locs, _, _ = mesh.ray.intersects_location([origin], [dirv], multiple_hits=False)
+                if len(locs):
+                    first = float(np.linalg.norm(locs[0] - origin))
+                    if first < size * 2 - max(1.0, 0.03 * size):
+                        continue              # something is in front of the pin in this view
+            out.setdefault(view, []).append({"n": p["n"], "u": round(float(u), 1), "v": round(float(v), 1)})
+    return out
 
 
 PLANNER_SYSTEM = """You edit a 3D-printable figure in Blender by returning JSON operations.
@@ -211,6 +268,9 @@ Operations (prefer the first three; the program computes their geometry, you onl
 - {"op":"smooth","iterations":1..10,"factor":0..1}, {"op":"scale","factor":[x,y,z]}, {"op":"rotate","degrees":[x,y,z]},
   {"op":"translate","mm":[x,y,z]}, {"op":"mirror","axis":"x"}, {"op":"solidify","thickness_mm":n},
   {"op":"decimate","ratio":0..1}, {"op":"drop_to_bed"}
+User notes: the request may list numbered notes. Each note's pin is drawn as a numbered magenta circle on the
+renders, and "notes" gives its u/v in every view where it is visible. When a note asks for a change AT its pin,
+use that view and u/v as the anchor. A note without a pin applies to the whole model.
 Placement rules:
 - Anchors point at what is visible in THESE renders. For a base and a name on it use add_base + base_text
   (both can be in one plan). Anything else you add is not in the images yet: place things on it next round.
@@ -247,36 +307,40 @@ def _drop_repeats(ops: list[dict], history: list[dict], j: Job) -> list[dict]:
 
 def _erase_ops(j: Job, version_file: Path, up: str, height: float) -> list[dict]:
     """Viewer tap points (glTF coords of the version file) -> print-frame mm, same transform as Blender."""
-    pts = np.array([e["p"] for e in j.input.get("erase", [])], dtype=float)
-    if not len(pts):
+    erase = j.input.get("erase", [])
+    if not erase:
         return []
-    m = meshio.geometry_only(version_file)
-    v = m.vertices.copy()
-    if up == "y":
-        R = meshio.Y_TO_Z[:3, :3]
-        v, pts = v @ R.T, pts @ R.T
-    lo, hi = v.min(axis=0), v.max(axis=0)
-    s = height / (hi[2] - lo[2])
-    v, pts = v * s, pts * s
-    lo, hi = v.min(axis=0), v.max(axis=0)
-    off = np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]])
-    pts = pts + off
+    pts, _ = to_print_mm(version_file, up, height, [e["p"] for e in erase])
     ops = [{"op": "erase_sphere", "center_mm": p.round(3).tolist(), "radius_mm": float(e.get("r_mm", 3))}
-           for p, e in zip(pts, j.input["erase"])]
+           for p, e in zip(pts, erase)]
     ops.append({"op": "remove_loose_parts", "min_fraction": 0.02})
     return validate_ops(ops, internal=True) if len(ops) <= MAX_OPS else \
         validate_ops(ops[:MAX_OPS - 1], internal=True) + validate_ops(ops[-1:], internal=True)
 
 
-def edit_loop(j: Job) -> None:
-    directive = (j.input.get("directive") or "").strip()
-    if not directive and not j.input.get("erase"):
+def edit_loop(j: Job, *, version_id: str | None = None, directive: str | None = None,
+              height: float | None = None, notes: list[dict] | None = None, eff: dict | None = None,
+              source: str = "mod03") -> None:
+    """Plan -> Blender -> check rounds. `notes` are the user's notes ({n, text, p: glTF point | None});
+    pinned ones are drawn on the renders the planner sees. Values default to the job's own input."""
+    directive = ((j.input.get("directive") or "") if directive is None else directive).strip()
+    notes = notes or []
+    if not directive and not j.input.get("erase") and not notes:
         raise JobFailed("Ne değişeceğini yaz ya da silinecek yerleri işaretle.")
-    height = float(j.input.get("height_mm", 80))
-    path, ver, meta = version_path(j.input["version_id"])
+    eff = eff or effort(j.input.get("effort"))
+    max_rounds = int(eff["edit_rounds"])
+    height = float(j.input.get("height_mm", 80) if height is None else height)
+    path, ver, meta = version_path(version_id or j.input["version_id"])
     j.asset_id = ver["asset_id"]
     work = j.dir
     about = meta.get("spec", {}).get("description") or meta.get("prompt") or ""
+
+    pins, pin_mesh = [], None
+    pinned = [n for n in notes if n.get("p")]
+    if pinned:
+        pts, pin_mesh = to_print_mm(path, meta.get("up", "y"), height, [n["p"] for n in pinned])
+        pins = [{"n": n["n"], "mm": p.round(2).tolist()} for n, p in zip(pinned, pts)]
+    note_list = [{"n": n["n"], "text": n["text"], "pinned": bool(n.get("p"))} for n in notes]
 
     if "current" not in j.ctx:
         j.state("MULTI_MODAL_ANALYSIS", "Model inceleniyor")
@@ -285,7 +349,7 @@ def edit_loop(j: Job) -> None:
         # start.glb is the model scaled to the print frame; colour it from its own reference copy
         meshio.transfer_colors(work / "start.ref.glb", work / "start.glb", work / "cur0.glb")
         j.ctx.update({"current": str(work / "cur0.glb"), "renders": first["renders"], "stats": first["stats"],
-                      "history": [], "missing": None})
+                      "frame": first.get("frame"), "history": [], "missing": None})
         j.save()
 
     history = j.ctx["history"]
@@ -300,14 +364,22 @@ def edit_loop(j: Job) -> None:
             j.log("Not: " + n)
         history.append({"ops": ops, "note": f"{len(j.input['erase'])} işaretli yer silindi", "stats": res["stats"]})
         j.ctx.update({"current": str(work / "cur_e.glb"), "renders": res["renders"], "stats": res["stats"],
-                      "changed": True, "erased": True})
+                      "frame": res.get("frame") or j.ctx.get("frame"), "changed": True, "erased": True})
         j.save()
-    while directive and len(history) < MAX_ROUNDS + (1 if j.ctx.get("erased") else 0):
+    while (directive or notes) and len(history) < max_rounds + (1 if j.ctx.get("erased") else 0):
         rnd = len(history)
-        j.state("MULTI_MODAL_ANALYSIS", f"Plan hazırlanıyor (tur {rnd + 1})")
-        content = _views_content(j.ctx["renders"], work, f"p{rnd}")
+        j.state("MULTI_MODAL_ANALYSIS", f"Plan hazırlanıyor (tur {rnd + 1}/{max_rounds})")
+        # pins belong to the model as it came in; once something moved it, they are given as text only
+        moved = any(o["op"] in MOVING_OPS for h in history for o in h["ops"])
+        marks = project_pins(pins, j.ctx["frame"], pin_mesh) if pins and j.ctx.get("frame") and not moved else {}
+        content = _views_content(j.ctx["renders"], work, f"p{rnd}", marks)
+        where = {p["n"]: {v: {"u": m["u"], "v": m["v"]} for v, ms in marks.items() for m in ms if m["n"] == p["n"]}
+                 for p in pins}
         content.append({"type": "text", "text": json.dumps({
             "request": directive, "model": about, "stats_mm": j.ctx["stats"],
+            "notes": [{**n, "visible_at": where.get(n["n"], {})} for n in note_list],
+            "careful": "Extra effort: before answering, re-check every anchor against the images and every size "
+                       "against stats_mm." if eff.get("careful") else None,
             "rounds_so_far": [{"applied_ops": h["ops"], "note": h.get("note"),
                                "failed_ops": h.get("failed_ops", []), "runner_notes": h.get("notes", [])}
                               for h in history],
@@ -329,6 +401,7 @@ def edit_loop(j: Job) -> None:
         try:
             res = run_blender({"input": j.ctx["current"], "height_mm": None, "ops": ops,
                                "render_dir": str(work / f"r{rnd + 1}"), "output": str(out_glb)}, work)
+            j.ctx["frame"] = res.get("frame") or j.ctx.get("frame")
         except BlenderError as e:
             history.append({"ops": ops, "note": f"uygulanamadı: {e}", "failed": True})
             j.log(f"Bu adım uygulanamadı: {e}")
@@ -355,7 +428,7 @@ def edit_loop(j: Job) -> None:
         check = {}
         try:
             content = _views_content(res["renders"], work, f"c{rnd}")
-            content.append({"type": "text", "text": json.dumps({"request": directive,
+            content.append({"type": "text", "text": json.dumps({"request": directive, "notes": note_list,
                                                                  "applied": [h["ops"] for h in history]},
                                                                 ensure_ascii=False)})
             check = llm.chat_json(CHECK_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=1500)
@@ -374,8 +447,9 @@ def edit_loop(j: Job) -> None:
     for p in j.ctx["renders"]:
         shutil.copyfile(p, work / f"final_{Path(p).stem}.png")
     final = Path(j.ctx["current"])
-    j.version_id = add_version(j.asset_id, "mod03", final,
+    j.version_id = add_version(j.asset_id, source, final,
                                {"up": "y", "directive": directive, "units": "mm", "height_mm": height,
+                                "effort": eff["name"], "notes": [n["text"] for n in notes],
                                 "ops": [h["ops"] for h in history]}, parent_id=ver["id"])
     j.ctx["result"] = {"asset_id": j.asset_id, "version_id": j.version_id,
                        "notes": [h.get("note") for h in history if h.get("note")]}

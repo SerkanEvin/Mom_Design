@@ -102,6 +102,62 @@ async function refreshMe() {
   const b = ME.balance;
   $("#credit").textContent = ME.user.unlimited ? "Sınırsız" : `Kredi ${money(b.available)}`;
   $("#nav-admin").hidden = ME.user.role !== "owner";
+  drawUsage();
+}
+
+// header gauge: ring = the most used of credit / this hour's AI calls / today's limit
+function usageRows() {
+  const u = ME.usage || {}; const rows = [];
+  const c = u.credit || {};
+  rows.push(c.unlimited ? { label: "Kredi", text: `Sınırsız · harcanan ${money(c.used)}`, pct: null }
+    : { label: "Kredi", text: `${money(c.used)} / ${money(c.granted)} kullanıldı`, pct: c.pct || 0,
+        hint: "Bitince Serkan'ın hesabından otomatik +5 $ yüklenir; sen ödemezsin." });
+  const a = u.ai_hour || {};
+  rows.push(a.limit ? { label: "Yapay zekâ (bu saat)", text: `${a.used} / ${a.limit} çağrı`, pct: Math.min(1, a.used / a.limit),
+    hint: "Saatlik sınır dolarsa biraz bekleyip tekrar dene." } : { label: "Yapay zekâ (bu saat)", text: `${a.used} çağrı · sınırsız`, pct: null });
+  const t = u.today || {};
+  rows.push({ label: "Bugünkü üretim", text: `${money(t.all)} / ${money(t.cap)} günlük sınır`, pct: t.cap ? Math.min(1, t.all / t.cap) : null,
+    hint: ME.user.role === "owner" ? "Tüm kullanıcılar toplamı." : `Senin payın ${money(t.mine)}.` });
+  return rows;
+}
+function level(p) { return p >= 0.9 ? "bad" : p >= 0.7 ? "warn" : "ok"; }
+function drawUsage() {
+  if (!ME) return;
+  const rows = usageRows(); const top = Math.max(0, ...rows.map(r => r.pct ?? 0));
+  const ring = $("#gring"); ring.setAttribute("stroke-dasharray", `${Math.max(2, Math.round(top * 100))} 100`);
+  $("#usage").dataset.level = level(top);
+  $("#usage").title = rows.map(r => `${r.label}: ${r.text}`).join("\n");
+  const pop = $("#usagepop"); pop.innerHTML = `<b>Kullanım</b>`;
+  rows.forEach(r => pop.append(h(`<div class="urow"><div class="row small"><span class="grow">${esc(r.label)}</span><b>${esc(r.text)}</b></div>
+    ${r.pct === null ? "" : `<div class="bar ${level(r.pct)}"><i style="width:${Math.round(r.pct * 100)}%"></i></div>`}
+    ${r.hint ? `<div class="small muted">${esc(r.hint)}</div>` : ""}</div>`)));
+}
+$("#usage").onclick = async e => {
+  e.stopPropagation(); const pop = $("#usagepop"); const open = pop.hidden;
+  if (open) { try { await refreshMe(); } catch {} }
+  pop.hidden = !open; $("#usage").setAttribute("aria-expanded", String(open));
+};
+document.addEventListener("click", e => { if (!e.target.closest("#usagepop")) { $("#usagepop").hidden = true; $("#usage").setAttribute("aria-expanded", "false"); } });
+
+// ------------------------------------------------------------------ effort (Orta / Yüksek / Ekstra)
+const EFFORT_HINT = {
+  mid: "Daha hızlı: daha az deneme ve kontrol turu.",
+  high: "Dengeli, önerilen: her adım bir kez kontrol edilir, gerekirse düzeltilir.",
+  extra: "En dikkatli: daha çok düzeltme turu, üstten görünüş ve keskin doku. Daha uzun sürer, biraz daha pahalı.",
+};
+function savedEffort() { try { return localStorage.getItem("effort") || "high"; } catch { return "high"; } }
+function effortPicker(onChange) {
+  const el = h(`<div class="field"><span class="flabel">Çaba</span><div class="seg effort" role="radiogroup" aria-label="Çaba"></div><div class="small muted ehint"></div></div>`);
+  el.value = savedEffort();
+  const seg = $(".seg", el);
+  (ME.efforts || [{ name: "mid", label: "Orta" }, { name: "high", label: "Yüksek" }, { name: "extra", label: "Ekstra" }]).forEach(x => {
+    const b = h(`<button type="button" role="radio" data-e="${x.name}">${esc(x.label)}</button>`);
+    b.onclick = () => { el.value = x.name; try { localStorage.setItem("effort", x.name); } catch {} sync(); onChange && onChange(x.name); };
+    seg.append(b);
+  });
+  const sync = () => { seg.querySelectorAll("button").forEach(b => { const on = b.dataset.e === el.value; b.classList.toggle("on", on); b.setAttribute("aria-checked", String(on)); }); $(".ehint", el).textContent = EFFORT_HINT[el.value] || ""; };
+  sync();
+  return el;
 }
 
 // ------------------------------------------------------------------ router
@@ -109,13 +165,15 @@ const routes = [
   [/^#?\/?$/, libraryPage], [/^#\/new$/, newPage], [/^#\/new\/photo$/, photoPage], [/^#\/new\/multi$/, multiPage],
   [/^#\/new\/file$/, filePage], [/^#\/job\/([\w]+)$/, jobPage], [/^#\/a\/([\w]+)$/, assetPage],
   [/^#\/a\/([\w]+)\/print$/, printPage], [/^#\/a\/([\w]+)\/edit$/, editPage], [/^#\/admin$/, adminPage],
+  [/^#\/draw$/, () => drawingPage(null)], [/^#\/d\/([\w]+)$/, drawingPage],
 ];
 async function route() {
   if (!ME) return;
   stopAll();
   const hash = location.hash || "#/";
   document.querySelectorAll(".topnav a").forEach(a => a.classList.toggle("on",
-    (a.dataset.nav === "lib" && (hash === "#/" || hash.startsWith("#/a/"))) || (a.dataset.nav === "new" && hash.startsWith("#/new")) || (a.dataset.nav === "admin" && hash === "#/admin")));
+    (a.dataset.nav === "lib" && (hash === "#/" || hash.startsWith("#/a/"))) || (a.dataset.nav === "new" && hash.startsWith("#/new")) || (a.dataset.nav === "admin" && hash === "#/admin") ||
+    (a.dataset.nav === "draw" && (hash === "#/draw" || hash.startsWith("#/d/")))));
   for (const [re, fn] of routes) {
     const m = hash.match(re);
     if (m) { app.innerHTML = ""; try { await fn(...m.slice(1)); } catch (e) { app.append(h(`<div class="card">Hata: ${esc(e.message)}</div>`)); } return; }
@@ -134,11 +192,17 @@ function takeKeyFromUrl() {
 // ------------------------------------------------------------------ library
 async function libraryPage() {
   const all = ME.user.role === "owner" ? 1 : 0;
-  const [{ assets }, { jobs }] = await Promise.all([api(`/api/assets?all=${all}`), api("/api/jobs?active=1")]);
+  const [{ assets }, { jobs }, { drawings }] = await Promise.all([api(`/api/assets?all=${all}`), api("/api/jobs?active=1"), api(`/api/drawings?all=${all}`)]);
   const el = h(`<section class="stack">
-    <div class="row"><h1 class="grow">Kitaplık</h1><a class="btn" href="#/new">+ Yeni model</a></div>
-    <div id="running"></div><div class="grid" id="grid"></div></section>`);
+    <div class="row"><h1 class="grow">Kitaplık</h1><a class="btn ghost" href="#/draw">✏️ Çiz</a><a class="btn" href="#/new">+ Yeni model</a></div>
+    <div id="running"></div><div id="draws"></div><div class="grid" id="grid"></div></section>`);
   app.append(el);
+  if (drawings.length) {
+    const d = h(`<div class="stack"><h2>Çizimler</h2><div class="strip"></div></div>`);
+    drawings.forEach(x => $(".strip", d).append(h(`<a class="tile mini" href="#/d/${x.id}"><div class="thumb" style="background-image:url('${x.image}')"></div><div class="meta"><div class="name">${esc(x.name)}</div></div></a>`)));
+    d.append(h(`<h2>Modeller</h2>`));
+    $("#draws", el).append(d);
+  }
   if (jobs.length) {
     const r = $("#running", el);
     r.append(h(`<div class="card stack"><b>Devam eden işler</b></div>`));
@@ -155,7 +219,7 @@ async function libraryPage() {
     g.append(t);
   }
 }
-function jobTitle(j) { return { mod01: "Fotoğraftan model", mod02: "Çoklu fotoğraftan model", import: "Dosya yükleme", prepare: "Baskı hazırlığı", resegment: "Renk bölgeleri", export: "Baskı dosyası", edit: "Blender düzenleme" }[j.module] || j.module; }
+function jobTitle(j) { return { mod01: "Fotoğraftan model", mod02: "Çoklu fotoğraftan model", import: "Dosya yükleme", prepare: "Baskı hazırlığı", resegment: "Renk bölgeleri", export: "Baskı dosyası", edit: "Blender düzenleme", agent: "Tasarım ajanı" }[j.module] || j.module; }
 
 // ------------------------------------------------------------------ new
 function newPage() {
@@ -163,6 +227,7 @@ function newPage() {
     <div class="modes">
       <a class="mode" href="#/new/photo"><span class="ic">📷</span><b>Bir fotoğraftan</b><span class="muted">Fotoğraf + kısa açıklama. Atölye diğer açıları kendisi çizer ve 3B modeli kurar.</span></a>
       <a class="mode" href="#/new/multi"><span class="ic">🖼️</span><b>Birkaç fotoğraftan</b><span class="muted">Aynı nesnenin önden, yandan, arkadan çekilmiş 2–6 fotoğrafı.</span></a>
+      <a class="mode" href="#/draw"><span class="ic">✏️</span><b>Bir çizimden</b><span class="muted">Parmağınla çiz ya da kâğıttaki çizimin fotoğrafını yükle, not ekle; ajan onu basılabilir bir nesneye çevirsin.</span></a>
       <a class="mode" href="#/new/file"><span class="ic">📦</span><b>3B dosya yükle</b><span class="muted">STL, OBJ, GLB, 3MF veya STEP. Düzenleyip baskıya hazırla.</span></a>
     </div></section>`));
 }
@@ -195,16 +260,18 @@ async function photoPage() {
     <div class="card stack"><div id="pick"></div>
       <label class="field"><span>Ne yapmak istiyorsun?</span><textarea id="prompt" maxlength="1000" placeholder="Örn: Bu kediyi 8 cm'lik bir biblo olarak bas, kulakları belirgin olsun."></textarea></label>
       <label class="check"><input type="checkbox" id="top"> Üstten görünüşü de üret (biraz daha pahalı)</label>
+      <div id="eff"></div>
       <div id="cost"></div>
       <button id="go" disabled>Modeli oluştur</button>
       <p class="small muted">Fotoğrafta tek nesne olsun, net ve iyi ışıkta. İşlem 2–4 dakika sürer.</p></div></section>`);
   app.append(el);
   const p = picker(false, "image/*"); $("#pick", el).append(p);
-  const upd = async () => { $("#cost", el).replaceChildren(await costLine("mod01", `&include_top=${$("#top", el).checked ? 1 : 0}`)); };
+  const eff = effortPicker(() => upd()); $("#eff", el).append(eff);
+  const upd = async () => { $("#cost", el).replaceChildren(await costLine("mod01", `&include_top=${$("#top", el).checked ? 1 : 0}&effort=${eff.value}`)); };
   p.addEventListener("change", () => ($("#go", el).disabled = !p.files.length));
   $("#top", el).onchange = upd; upd();
   $("#go", el).onclick = async () => {
-    const f = new FormData(); f.append("image", p.files[0]); f.append("prompt", $("#prompt", el).value); f.append("include_top", $("#top", el).checked ? "1" : "0");
+    const f = new FormData(); f.append("image", p.files[0]); f.append("prompt", $("#prompt", el).value); f.append("include_top", $("#top", el).checked ? "1" : "0"); f.append("effort", eff.value);
     $("#go", el).disabled = true; $("#go", el).textContent = "Gönderiliyor…";
     try { const j = await api("/api/jobs/mod01", { form: f }); location.hash = `#/job/${j.id}`; }
     catch (e) { toast(e.message); $("#go", el).disabled = false; $("#go", el).textContent = "Modeli oluştur"; }
@@ -247,11 +314,13 @@ async function filePage() {
 const STEP_ORDER = {
   mod01: ["INTENT_EXTRACTION", "MULTIVIEW_PROMPT_GENERATION", "BACKGROUND_REMOVAL", "PERSPECTIVE_SYNTHESIS", "VIEW_QA", "3D_RECONSTRUCTION"],
   mod02: ["IMAGE_VALIDATION_AND_CLEANUP", "BACKGROUND_REMOVAL", "MULTI_IMAGE_3D_GENERATION"],
+  agent: ["AGENT_PLAN", "SKETCH_TO_PHOTO", "RELIEF_BUILD", "INTENT_EXTRACTION", "MULTIVIEW_PROMPT_GENERATION", "BACKGROUND_REMOVAL",
+          "PERSPECTIVE_SYNTHESIS", "VIEW_QA", "3D_RECONSTRUCTION", "MULTI_MODAL_ANALYSIS", "MCP_EXECUTION", "REVIEW", "VERSIONING_AND_RENDER"],
 };
 async function jobPage(id) {
   const el = h(`<section class="stack" style="max-width:720px"><h1 id="jt">İş</h1><div class="card stack">
     <div class="bar"><i style="width:5%"></i></div><ul class="steps" id="steps"></ul><div id="foot" class="row"></div></div>
-    <div id="views" class="previews"></div></section>`);
+    <div id="agentout"></div><div id="views" class="previews"></div></section>`);
   app.append(el);
   const tick = async () => {
     let j; try { j = await api(`/api/jobs/${id}`); } catch (e) { toast(e.message); return; }
@@ -269,11 +338,14 @@ async function jobPage(id) {
     const foot = $("#foot", el); foot.innerHTML = "";
     foot.append(h(`<span class="small muted grow">Harcanan ${money(j.cost_usd)}${j.est_usd ? ` · tahmin ${money(j.est_usd)}` : ""}</span>`));
     if (j.module === "mod01") showViews(id, $("#views", el), j);
+    if (j.module === "agent" && j.input?.target === "drawing") showViews(id, $("#views", el), j, "", ["drawing", "sketch_photo", "view_front", "view_right", "view_back", "view_left", "view_top"]);
+    if (j.module === "agent" && j.input?.target !== "drawing" && j.status === "done") showViews(id, $("#views", el), j, "final_", ["front", "right", "back", "top"]);
     if (j.module === "edit" && j.status === "done") showViews(id, $("#views", el), j, "final_", ["front", "right", "back", "top"]);
     if (j.status === "done") {
       await refreshMe();
       const aid = j.result?.asset_id || j.asset_id;
       if (aid && ["mod01", "mod02", "import"].includes(j.module)) { toast("Model hazır!"); location.hash = `#/a/${aid}`; return; }
+      if (j.module === "agent") { showAgentResult($("#agentout", el), j); return; }
       foot.append(h(`<a class="btn" href="#/a/${aid}">Modele git</a>`)); return;
     }
     if (j.status === "failed" || j.status === "cancelled") {
@@ -285,6 +357,16 @@ async function jobPage(id) {
     pollTimer = setTimeout(tick, 2000);
   };
   tick();
+}
+function showAgentResult(box, j) {
+  const r = j.result || {};
+  if (r.version_id) sessionStorage.setItem("ver:" + r.asset_id, r.version_id);
+  box.replaceChildren(h(`<div class="card stack agentcard"><div class="row"><span class="ic">🤖</span><b class="grow">Ajan bitirdi</b><span class="badge ok">Baskıya hazır</span></div>
+    ${r.explanation_tr ? `<p>${esc(r.explanation_tr)}</p>` : ""}
+    ${(r.notes || []).length ? `<ul class="problems small">${r.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    ${(r.tips_tr || []).length ? `<div><b class="small">Baskı ipuçları</b><ul class="problems">${r.tips_tr.map(t => `<li>${esc(t)}</li>`).join("")}</ul></div>` : ""}
+    <p class="small muted">Baskı kontrolü ve renk ayrımı da yapıldı. Baskı sayfasında renkleri değiştirip Bambu dosyasını indirebilirsin.</p>
+    <div class="row"><a class="btn" href="#/a/${r.asset_id}/print">🖨️ Baskıya hazırla</a><a class="btn ghost" href="#/a/${r.asset_id}">Modeli gör</a></div></div>`));
 }
 function showViews(id, box, j, prefix = "view_", names = ["front", "right", "back", "left", "top"]) {
   names.forEach(n => {
@@ -300,8 +382,11 @@ async function assetPage(id) {
   const v = a.latest;
   const el = h(`<section class="stack">
     <div class="row"><h1 class="grow" id="nm">${esc(a.name)}</h1><button class="ghost small" id="ren">Adını değiştir</button></div>
-    <div class="split"><div id="vbox"></div>
+    <div class="split"><div class="stack"><div id="vbox"></div>
+        <div class="row"><div class="seg" id="tool"><button data-t="look" class="on">Döndür</button><button data-t="note">📝 Not al</button></div>
+          <span class="small muted" id="toolhint"></span></div></div>
       <div class="stack">
+        <div id="notes"></div>
         <div class="card stack"><b>Ne yapmak istersin?</b>
           <a class="btn" href="#/a/${id}/print">🖨️ Baskıya hazırla (Bambu)</a>
           <a class="btn ghost" href="#/a/${id}/edit">✏️ Düzenle (Blender)</a>
@@ -313,15 +398,31 @@ async function assetPage(id) {
   app.append(el);
   const vb = viewerBox(); $("#vbox", el).append(vb);
   activeViewer = new Viewer(vb);
-  let cur = v;
+  let cur = v; let model = null; let tool = "look";
+  const notes = notesPanel({ kind: "model", assetId: id, getVersion: () => cur, viewer: () => activeViewer, getModel: () => model });
+  $("#notes", el).append(notes.el);
+  $("#tool", el).onclick = e => { const b = e.target.closest("button"); if (!b) return; tool = b.dataset.t;
+    $("#tool", el).querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    $("#toolhint", el).textContent = tool === "note" ? "Modelde not bırakmak istediğin yere dokun." : ""; };
+  const canvas = activeViewer.renderer.domElement; const ray = new THREE.Raycaster(); let down = null;
+  canvas.addEventListener("pointerdown", e => (down = [e.clientX, e.clientY]));
+  canvas.addEventListener("pointerup", e => {
+    if (tool !== "note" || !model || !down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;
+    const r = canvas.getBoundingClientRect();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), activeViewer.camera);
+    const hit = ray.intersectObjects(model.children, true).find(x => !x.object.userData.pin); if (!hit) return;
+    const p = model.worldToLocal(hit.point.clone());
+    notes.compose([p.x, p.y, p.z]);
+  });
   const show = async ver => {
     cur = ver; $(".loading", vb).hidden = false;
     $("#vers", el).querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.id === ver.id));
     const m = ver.meta || {};
-    $("#vmeta", el).textContent = [ver.source === "mod03" ? "Blender düzenlemesi" : ver.source === "upload" ? "Yüklenen dosya" : "Üretilen model",
+    $("#vmeta", el).textContent = [{ mod03: "Blender düzenlemesi", upload: "Yüklenen dosya", agent: "Ajanın sürümü", drawing: "Çizimden" }[ver.source] || "Üretilen model",
+      m.effort ? `çaba: ${{ mid: "orta", high: "yüksek", extra: "ekstra" }[m.effort] || m.effort}` : "",
       m.prompt ? `“${m.prompt}”` : "", m.directive ? `“${m.directive}”` : "", when(ver.created_at)].filter(Boolean).join(" · ");
     try {
-      await activeViewer.load(ver.url); $(".loading", vb).hidden = true;
+      model = await activeViewer.load(ver.url); $(".loading", vb).hidden = true; notes.refresh();
       if (!a.has_thumb) { a.has_thumb = true; setTimeout(() => api(`/api/assets/${id}/thumb`, { body: { png: activeViewer.snapshot() } }).catch(() => {}), 600); }
     } catch (e) { $(".loading", vb).textContent = "Model açılamadı."; }
   };
@@ -334,18 +435,123 @@ async function assetPage(id) {
 }
 function chosenVersion(a, id) { const vid = sessionStorage.getItem("ver:" + id); return a.versions.find(x => x.id === vid) || a.latest; }
 
+// ------------------------------------------------------------------ notes + design agent
+function pinSprite(label, done) {
+  const c = document.createElement("canvas"); c.width = c.height = 64; const g = c.getContext("2d");
+  g.fillStyle = done ? "#2f7d4f" : "#d628a0"; g.beginPath(); g.arc(32, 32, 28, 0, Math.PI * 2); g.fill();
+  g.lineWidth = 5; g.strokeStyle = "#fff"; g.stroke();
+  g.fillStyle = "#fff"; g.font = "bold 30px Nunito, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(label, 32, 34);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
+  sp.renderOrder = 10; sp.userData.pin = true; return sp;
+}
+const STATUS_TR = { open: "", sent: "ajanda", done: "yapıldı" };
+
+/* Notes on a 3D model (kind "model": pos = point in the version file's coordinates) or on a drawing
+   (kind "drawing": pos = [u, v] in 0..100). Open notes are numbered 1..N in the order the agent receives them. */
+function notesPanel(o) {
+  const el = h(`<div class="card stack notes"><div class="row"><b class="grow">📝 Notlar</b><span class="small muted" id="ncount"></span></div>
+    <p class="small muted">${o.kind === "model" ? "“Not al” ile modelde bir yere dokun ya da aşağıya genel bir not yaz." : "“Not” aracıyla çizimde bir yere dokun ya da aşağıya genel bir not yaz."} Notlar ajana gider; o da baskıya hazır bir model yapar.</p>
+    <div class="composer" hidden><label class="field"><span id="cmlabel">Not</span><textarea id="cmtext" maxlength="600" placeholder="Örn: Burası daha kalın olsun / buraya ASLI yaz"></textarea></label>
+      <div class="row"><button class="small" id="cmsave">Notu kaydet</button><button class="ghost small" id="cmcancel" type="button">Vazgeç</button></div></div>
+    <ol class="notelist" id="nlist"></ol>
+    <div class="row"><input type="text" id="general" maxlength="600" placeholder="Genel not (tüm ${o.kind === "model" ? "model" : "çizim"} için)" class="grow" style="flex:1 1 180px"><button class="ghost small" id="addgen">Ekle</button></div>
+    <details class="send"><summary><b>🤖 Ajana gönder</b></summary><div class="stack">
+      <div id="eff"></div>
+      <label class="field"><span>Yükseklik (mm, boş bırakırsan ajan seçer)</span><input type="number" id="ahmm" min="5" max="250" placeholder="Örn: 60"></label>
+      <label class="field"><span>Ajana ek bilgi (isteğe bağlı)</span><input type="text" id="extra" maxlength="600" placeholder="Örn: Annem için hediye, mavi-beyaz olsun"></label>
+      <div id="acost"></div>
+      <button id="send">🤖 Notları ajana gönder</button>
+      <p class="small muted">Ajan yeni başlayanlar için düşünür: devrilmeyecek taban, kalın duvar, okunur yazı, uygun boyut. Sonuç yeni bir sürüm olur, eskisi korunur.</p></div></details></div>`);
+  let notes = []; let pending = null; let tempPin = null; const pins = [];
+  const eff = effortPicker(() => cost()); $("#eff", el).append(eff);
+  async function cost() {
+    if (o.kind === "model") { $("#acost", el).replaceChildren(h(`<div class="cost"><span>fal maliyeti yok</span><span class="small">yapay zekâ + Blender, 1–${eff.value === "extra" ? 10 : 5} dk</span></div>`)); return; }
+    const est = await api(`/api/estimate?module=agent&target=drawing&effort=${eff.value}`);
+    $("#acost", el).replaceChildren(h(`<div class="cost"><span>Düz model ücretsiz · 3B figür ≈ ${money(est.usd)}</span><span class="small">${ME.user.unlimited ? "Sınırsız" : `Kalan ${money(est.balance.available)}`}</span></div>`));
+  }
+  cost();
+  const visible = () => notes.filter(n => o.kind !== "model" || !n.pos || n.version_id === o.getVersion()?.id);
+  const numbering = () => { const m = new Map(); visible().filter(n => n.status === "open").forEach((n, i) => m.set(n.id, i + 1)); return m; };
+  function drawPins() {
+    pins.forEach(p => p.parent && p.parent.remove(p)); pins.length = 0;
+    const nums = numbering();
+    if (o.kind === "model") {
+      const model = o.getModel(); if (!model) return;
+      const r = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).length() || 1;
+      for (const n of visible()) {
+        if (!n.pos) continue;
+        const sp = pinSprite(nums.has(n.id) ? String(nums.get(n.id)) : "✓", n.status !== "open");
+        sp.position.fromArray(n.pos); const k = r * 0.07 / (model.scale.x || 1); sp.scale.set(k, k, k);
+        model.add(sp); pins.push(sp);
+      }
+    } else o.drawPins && o.drawPins(visible().filter(n => n.pos).map(n => ({ ...n, label: nums.has(n.id) ? String(nums.get(n.id)) : "✓" })), pending);
+  }
+  function list() {
+    const ul = $("#nlist", el); ul.innerHTML = ""; const nums = numbering(); const vs = visible();
+    $("#ncount", el).textContent = vs.length ? `${nums.size} açık · ${vs.length} toplam` : "";
+    if (!vs.length) ul.append(h(`<li class="muted small none">Henüz not yok.</li>`));
+    vs.forEach(n => {
+      const li = h(`<li class="${n.status}"><span class="num">${nums.has(n.id) ? nums.get(n.id) : "✓"}</span><span class="grow">${esc(n.text)}${n.pos ? "" : ` <span class="small muted">(genel)</span>`}
+        ${STATUS_TR[n.status] ? ` <span class="badge ${n.status === "done" ? "ok" : "warn"}">${STATUS_TR[n.status]}</span>` : ""}${n.status === "sent" && n.job_id ? ` <a class="small" href="#/job/${n.job_id}">işe git</a>` : ""}</span>
+        <button class="ghost small" data-a="edit" title="Düzenle" aria-label="Düzenle">✎</button><button class="ghost small" data-a="del" title="Sil" aria-label="Sil">✕</button></li>`);
+      $("[data-a=edit]", li).onclick = async () => { const t = prompt("Notu düzenle", n.text); if (t && t.trim()) { await api(`/api/notes/${n.id}/update`, { body: { text: t } }); refresh(); } };
+      $("[data-a=del]", li).onclick = async () => { if (confirm("Not silinsin mi?")) { await api(`/api/notes/${n.id}/delete`, { body: {} }); refresh(); } };
+      ul.append(li);
+    });
+    $("#send", el).disabled = !nums.size && !$("#extra", el).value.trim();
+    if (nums.size && !el.dataset.opened) { el.dataset.opened = "1"; $("details.send", el).open = true; }
+  }
+  async function refresh() {
+    const id = o.kind === "model" ? o.assetId : o.getDrawingId();
+    if (!id) { notes = []; list(); drawPins(); return; }
+    notes = (await api(`/api/notes?${o.kind === "model" ? "asset_id" : "drawing_id"}=${id}`)).notes; list(); drawPins();
+  }
+  async function save(pos) {
+    const text = (pos === undefined ? $("#general", el).value : $("#cmtext", el).value).trim();
+    if (!text) return toast("Not boş olamaz");
+    const body = { kind: o.kind, text, pos: pos ?? null };
+    if (o.kind === "model") body.version_id = o.getVersion().id; else body.drawing_id = await o.ensureDrawing();
+    await api("/api/notes", { body }); toast("Not kaydedildi", 1400);
+    if (pos === undefined) $("#general", el).value = ""; closeComposer(); refresh();
+  }
+  function closeComposer() { pending = null; $(".composer", el).hidden = true; if (tempPin) { tempPin.parent?.remove(tempPin); tempPin = null; } drawPins(); }
+  function compose(pos) {
+    pending = pos; $(".composer", el).hidden = false; $("#cmtext", el).value = ""; $("#cmlabel", el).textContent = "Bu nokta için not";
+    if (o.kind === "model") { const model = o.getModel(); if (tempPin) tempPin.parent?.remove(tempPin);
+      tempPin = pinSprite("+", false); tempPin.position.fromArray(pos); const r = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).length() || 1;
+      const k = r * 0.07; tempPin.scale.set(k, k, k); model.add(tempPin); }
+    else drawPins();
+    $("#cmtext", el).focus({ preventScroll: true }); el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  $("#cmsave", el).onclick = () => save(pending);
+  $("#cmcancel", el).onclick = closeComposer;
+  $("#addgen", el).onclick = () => save(undefined);
+  $("#general", el).onkeydown = e => { if (e.key === "Enter") save(undefined); };
+  $("#extra", el).oninput = list;
+  $("#send", el).onclick = async () => {
+    const b = $("#send", el); b.disabled = true; b.textContent = "Gönderiliyor…";
+    try {
+      const body = { effort: eff.value, extra: $("#extra", el).value, height_mm: $("#ahmm", el).value || null };
+      if (o.kind === "model") body.version_id = o.getVersion().id; else body.drawing_id = await o.ensureDrawing(true);
+      const j = await api("/api/agent", { body }); location.hash = `#/job/${j.id}`;
+    } catch (e) { toast(e.message); b.disabled = false; b.textContent = "🤖 Notları ajana gönder"; }
+  };
+  return { el, refresh, compose, eff };
+}
+
 // ------------------------------------------------------------------ print prep (MOD-04)
 async function printPage(id) {
   const a = await api(`/api/assets/${id}`);
   const ver = chosenVersion(a, id);
   const lastPrep = a.jobs.find(j => j.module === "prepare" && j.status === "done" && j.version_id === ver.id);
+  const pendingPrep = !lastPrep && a.jobs.find(j => j.module === "prepare" && ["queued", "running"].includes(j.status) && j.version_id === ver.id);
   const el = h(`<section class="stack"><div class="row"><a href="#/a/${id}" class="small">← ${esc(a.name)}</a></div>
     <h1>Baskıya hazırla</h1>
     <div class="split"><div class="stack"><div id="vbox"></div>
         <div class="row"><div class="seg" id="mode"><button data-m="color" class="on">Renkler</button><button data-m="overhang">Sarkmalar</button><button data-m="thin">İnce duvar</button></div></div></div>
       <div class="stack">
         <div class="card stack" id="setup"><b>Ayarlar</b>
-          <label class="field"><span>Yükseklik (mm)</span><input type="number" id="hmm" min="5" max="250" value="80"></label>
+          <label class="field"><span>Yükseklik (mm)</span><input type="number" id="hmm" min="1" max="250" step="0.1" value="${+(ver.meta?.height_mm || 80).toFixed(1)}"></label>
           <label class="field"><span>Renk sayısı (AMS yuvası)</span><select id="k"><option>1</option><option>2</option><option selected>3</option><option>4</option></select></label>
           <label class="check small"><input type="checkbox" id="remesh"> Yüzeyi baştan ör (bozuk modeller için)</label>
           <button id="run">Kontrol et ve renkleri ayır</button><p class="small muted">Ücretsiz. Birkaç saniye – 1 dakika.</p></div>
@@ -465,6 +671,11 @@ async function printPage(id) {
     }));
   }
   if (lastPrep) { await loadPrep(lastPrep); }
+  else if (pendingPrep) {
+    $("#run", el).disabled = true; $("#out", el).innerHTML = `<div class="card">Ajanın başlattığı kontrol sürüyor…</div>`;
+    waitJob(pendingPrep.id, async done => { $("#run", el).disabled = false; if (done.status === "done") await loadPrep(done); else $("#out", el).innerHTML = ""; },
+      p => { $("#out", el).innerHTML = `<div class="card">${esc(p.log.at(-1)?.m || "Sırada…")}</div>`; });
+  }
 }
 
 function waitJob(id, onDone, onProgress) {
@@ -491,12 +702,14 @@ async function editPage(id) {
         <p class="muted">Yazılı istekleri yapay zekâ Blender'da uygular; silgi işaretlerini doğrudan siler. Sonuç yeni sürüm olur (v${ver.n} korunur).</p>
         <div class="examples" id="ex"></div>
         <label class="field"><span>İstek (isteğe bağlı)</span><textarea id="dir" maxlength="1000" placeholder="Örn: Altına 8 mm yuvarlak taban ekle ve tabanın önüne ASLI yaz."></textarea></label>
-        <label class="field"><span>Model yüksekliği (mm)</span><input type="number" id="hmm" value="${Math.round(ver.meta?.height_mm || 80)}" min="5" max="250"></label>
+        <label class="field"><span>Model yüksekliği (mm)</span><input type="number" id="hmm" value="${Math.round(ver.meta?.height_mm || 80)}" min="1" max="250"></label>
+        <div id="eff"></div>
         <button id="go">Uygula</button><p class="small muted">Ücretsiz (yapay zekâ + Blender). 1–5 dakika.</p></div></div></section>`);
   app.append(el);
   ["Altına 8 mm yuvarlak taban ekle ve önüne ismimi yaz", "Altına düz kare taban ekle", "Anahtarlık için üstüne 4 mm delik aç", "Boşta duran küçük parçaları temizle"].forEach(t => {
     const b = h(`<button type="button">${esc(t)}</button>`); b.onclick = () => ($("#dir", el).value = t); $("#ex", el).append(b);
   });
+  const eff = effortPicker(); $("#eff", el).append(eff);
   const vb = viewerBox("Silgi seçiliyken dokunduğun yer işaretlenir"); $("#vbox", el).append(vb);
   activeViewer = new Viewer(vb);
   let model = null; const marks = []; let tool = "look";
@@ -524,11 +737,94 @@ async function editPage(id) {
     const directive = $("#dir", el).value.trim();
     if (!directive && !marks.length) return toast("Bir istek yaz ya da silinecek yerleri işaretle");
     try {
-      const j = await api("/api/jobs/edit", { body: { version_id: ver.id, directive, height_mm: +$("#hmm", el).value,
+      const j = await api("/api/jobs/edit", { body: { version_id: ver.id, directive, height_mm: +$("#hmm", el).value, effort: eff.value,
         erase: marks.map(m => ({ p: m.p, r_mm: m.r_mm })) } });
       location.hash = `#/job/${j.id}`;
     } catch (e) { toast(e.message); }
   };
+}
+
+// ------------------------------------------------------------------ 2D drawings
+const PENS = ["#1e1e20", "#2459c8", "#d23b3b", "#2f8f4f", "#e08a1e", "#8a4fd0"];
+async function drawingPage(id) {
+  let d = id ? await api(`/api/drawings/${id}`) : null;
+  const el = h(`<section class="stack"><div class="row"><a href="#/" class="small">← Kitaplık</a></div>
+    <div class="row"><h1 class="grow">${d ? esc(d.name) : "Yeni çizim"}</h1></div>
+    <div class="split"><div class="stack">
+        <div class="paper" id="paper"><canvas id="cv" width="1200" height="900" aria-label="Çizim alanı"></canvas><div class="pins" id="pins"></div></div>
+        <div class="row tools"><div class="seg" id="tool"><button data-t="pen" class="on">✏️ Kalem</button><button data-t="eraser">🧽 Silgi</button><button data-t="note">📝 Not</button></div>
+          <div class="pens" id="pens"></div>
+          <select id="size" style="max-width:120px" aria-label="Kalınlık"><option value="4">İnce</option><option value="9" selected>Orta</option><option value="18">Kalın</option><option value="34">Çok kalın</option></select></div>
+        <div class="row"><button class="ghost small" id="undo">↶ Geri al</button><button class="ghost small" id="clear">Temizle</button>
+          <button class="ghost small" id="photo">📷 Kâğıttaki çizimi yükle</button><input type="file" id="pf" accept="image/*" hidden>
+          <span class="grow"></span><button class="small" id="save">Kaydet</button></div>
+        <p class="small muted">İpucu: düz bir şey (anahtarlık, isimlik, kurabiye kalıbı) için kalın ve kapalı çizgiler çiz. Bir figür için şeklini çiz ve notlarla anlat (renk, boyut, ne olduğu).</p></div>
+      <div class="stack"><div class="card stack"><label class="field"><span>Çizimin adı</span><input type="text" id="dname" maxlength="80" value="${esc(d?.name || "")}" placeholder="Örn: Kedi anahtarlık"></label></div>
+        <div id="notes"></div><div id="made"></div>
+        ${d ? `<button class="danger small" id="del">Çizimi sil</button>` : ""}</div></div></section>`);
+  app.append(el);
+  const cv = $("#cv", el); const g = cv.getContext("2d"); g.lineCap = g.lineJoin = "round";
+  let tool = "pen", color = PENS[0], dirty = false; const undo = [];
+  const blank = () => { g.save(); g.globalCompositeOperation = "source-over"; g.fillStyle = "#ffffff"; g.fillRect(0, 0, cv.width, cv.height); g.restore(); };
+  blank();
+  const snap = () => { undo.push(g.getImageData(0, 0, cv.width, cv.height)); if (undo.length > 25) undo.shift(); };
+  if (d) { const im = new Image(); im.onload = () => { fitImage(im); dirty = false; }; im.src = d.image; }
+  function fitImage(im) {
+    const k = Math.min(cv.width / im.width, cv.height / im.height); const w = im.width * k, hh = im.height * k;
+    blank(); g.drawImage(im, (cv.width - w) / 2, (cv.height - hh) / 2, w, hh); dirty = true;
+  }
+  PENS.forEach((c, i) => { const b = h(`<button type="button" class="pen ${i ? "" : "on"}" style="--c:${c}" aria-label="Renk ${i + 1}"></button>`);
+    b.onclick = () => { color = c; $("#pens", el).querySelectorAll(".pen").forEach(x => x.classList.toggle("on", x === b)); if (tool !== "pen") setTool("pen"); }; $("#pens", el).append(b); });
+  const setTool = t => { tool = t; $("#tool", el).querySelectorAll("button").forEach(x => x.classList.toggle("on", x.dataset.t === t)); $("#paper", el).dataset.tool = t; };
+  $("#tool", el).onclick = e => { const b = e.target.closest("button"); if (b) setTool(b.dataset.t); };
+  setTool("pen");
+  const at = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; };
+  let drawing = null;
+  cv.addEventListener("pointerdown", e => {
+    const [u, v] = at(e);
+    if (tool === "note") { notes.compose([Math.round(u * 1000) / 10, Math.round(v * 1000) / 10]); return; }
+    cv.setPointerCapture(e.pointerId); snap(); drawing = [u * cv.width, v * cv.height];
+    g.globalCompositeOperation = "source-over"; g.strokeStyle = tool === "eraser" ? "#ffffff" : color;
+    g.lineWidth = +$("#size", el).value * (tool === "eraser" ? 2.2 : 1) * (e.pointerType === "pen" && e.pressure ? 0.6 + e.pressure : 1);
+    g.beginPath(); g.moveTo(...drawing); g.lineTo(drawing[0] + 0.01, drawing[1]); g.stroke();
+  });
+  cv.addEventListener("pointermove", e => { if (!drawing) return; const [u, v] = at(e); const p = [u * cv.width, v * cv.height];
+    g.beginPath(); g.moveTo(...drawing); g.lineTo(...p); g.stroke(); drawing = p; dirty = true; });
+  const end = () => (drawing = null); cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  $("#undo", el).onclick = () => { const s = undo.pop(); if (s) { g.putImageData(s, 0, 0); dirty = true; } };
+  $("#clear", el).onclick = () => { if (confirm("Çizim temizlensin mi?")) { snap(); blank(); dirty = true; } };
+  $("#photo", el).onclick = () => $("#pf", el).click();
+  $("#pf", el).onchange = () => { const f = $("#pf", el).files[0]; if (!f) return; const im = new Image(); im.onload = () => { snap(); fitImage(im); URL.revokeObjectURL(im.src); }; im.src = URL.createObjectURL(f); };
+  const blob = () => new Promise(r => cv.toBlob(r, "image/png"));
+  async function save(quiet) {
+    const f = new FormData(); f.append("image", await blob(), "cizim.png"); f.append("name", $("#dname", el).value.trim() || "Çizim");
+    if (!d) { d = await api("/api/drawings", { form: f }); history.replaceState(null, "", `#/d/${d.id}`); $("h1", el).textContent = d.name; }
+    else {
+      await api(`/api/drawings/${d.id}/image`, { form: f });
+      const nm = $("#dname", el).value.trim(); if (nm && nm !== d.name) { await api(`/api/drawings/${d.id}/rename`, { body: { name: nm } }); d.name = nm; $("h1", el).textContent = nm; }
+    }
+    dirty = false; if (!quiet) toast("Çizim kaydedildi", 1400);
+    return d.id;
+  }
+  $("#save", el).onclick = async () => { try { await save(); } catch (e) { toast(e.message); } };
+  const notes = notesPanel({ kind: "drawing", getDrawingId: () => d?.id,
+    ensureDrawing: async () => (!d || dirty) ? save(true) : d.id,
+    drawPins: (list, pending) => {
+      const box = $("#pins", el); box.innerHTML = "";
+      list.forEach(n => box.append(h(`<span class="dpin ${n.status !== "open" ? "done" : ""}" style="left:${n.pos[0]}%;top:${n.pos[1]}%" title="${esc(n.text)}">${esc(n.label)}</span>`)));
+      if (pending) box.append(h(`<span class="dpin new" style="left:${pending[0]}%;top:${pending[1]}%">+</span>`));
+    } });
+  $("#notes", el).append(notes.el); notes.refresh();
+  if (d) {
+    const jobsDone = d.jobs.filter(j => j.status !== "cancelled");
+    if (jobsDone.length) {
+      const m = h(`<div class="card stack"><b>Bu çizimden yapılanlar</b></div>`);
+      jobsDone.forEach(j => m.append(h(`<a class="row" style="text-decoration:none;color:inherit" href="${j.status === "done" && j.result?.asset_id ? `#/a/${j.result.asset_id}` : `#/job/${j.id}`}">
+        <span class="dot ${j.status === "done" ? "ok" : j.status === "failed" ? "bad" : "run"}"></span><span class="grow">${esc(j.result?.explanation_tr || (j.status === "failed" ? j.error : "Ajan çalışıyor…") || "")}</span><span class="small muted">${when(j.created_at)}</span></a>`)));
+      $("#made", el).append(m);
+    }
+    $("#del", el).onclick = async () => { if (confirm("Çizim silinsin mi?")) { await api(`/api/drawings/${d.id}/delete`, { body: {} }); location.hash = "#/"; } };
+  }
 }
 
 // ------------------------------------------------------------------ admin (owner)

@@ -20,10 +20,14 @@
   <nav class="topnav">
     <a href="#/" data-nav="lib">Kitaplık</a>
     <a href="#/new" data-nav="new">Yeni</a>
+    <a href="#/draw" data-nav="draw">Çiz</a>
     <a href="#/admin" data-nav="admin" id="nav-admin" hidden>Yönetim</a>
   </nav>
   <div class="who">
-    <span class="chip" id="credit" title="fal.ai kredisi"></span>
+    <button class="gauge" id="usage" type="button" aria-haspopup="true" aria-expanded="false" title="Kullanım">
+      <svg viewBox="0 0 36 36" aria-hidden="true"><circle class="g-bg" cx="18" cy="18" r="15"/><circle class="g-fg" id="gring" cx="18" cy="18" r="15" pathLength="100" stroke-dasharray="0 100"/></svg>
+      <span id="credit"></span></button>
+    <div class="usagepop card" id="usagepop" hidden></div>
     <button class="ghost small" id="logout" type="button">Çıkış</button>
   </div>
 </header>

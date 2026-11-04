@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, db, imaging, jobs, ledger, meshio, notify
-from .config import get_settings, save_secret, secret
+from .config import EFFORTS, effort, get_settings, save_secret, secret
 from .pipelines import estimate
 
 log = logging.getLogger("studio")
@@ -151,7 +151,8 @@ def logout(req: Request, resp: Response):
 
 @app.get("/api/me")
 def me(u=Depends(current_user)):
-    out = {"user": auth.public_user(u), "balance": ledger.balance(u["id"])}
+    out = {"user": auth.public_user(u), "balance": ledger.balance(u["id"]), "usage": ledger.usage(u["id"]),
+           "efforts": [{"name": k, "label": v["label"]} for k, v in EFFORTS.items()]}
     if u["role"] == "owner":
         out["fal_balance"] = ledger.fal_balance_amount()
     return out
@@ -174,7 +175,8 @@ def _version_json(v) -> dict:
     meta = json.loads(v["meta"])
     return {"id": v["id"], "n": v["n"], "source": v["source"], "parent_id": v["parent_id"],
             "url": f"/api/files/{v['asset_id']}/{v['n']}/{v['model_file']}", "created_at": v["created_at"],
-            "meta": {k: meta[k] for k in ("prompt", "directive", "views", "images", "original", "height_mm")
+            "meta": {k: meta[k] for k in ("prompt", "directive", "views", "images", "original", "height_mm",
+                                          "effort", "notes", "drawing_id", "relief")
                      if k in meta}}
 
 
@@ -270,20 +272,30 @@ def _new_job(u, module: str, inp: dict, files: dict[str, bytes] | None = None, *
     return _job_json(db.row("SELECT * FROM jobs WHERE id=?", jid))
 
 
+def _effort_name(v) -> str:
+    v = str(v or "")
+    if v and v not in EFFORTS:
+        raise HTTPException(400, "Çaba seviyesi: orta, yüksek ya da ekstra")
+    return effort(v)["name"]
+
+
 @app.get("/api/estimate")
-def get_estimate(module: str, include_top: int = 0, count: int = 1, u=Depends(current_user)):
-    return {"usd": estimate(module, {"include_top": bool(include_top), "count": count}),
+def get_estimate(module: str, include_top: int = 0, count: int = 1, effort: str = "", target: str = "",
+                 u=Depends(current_user)):
+    return {"usd": estimate(module, {"include_top": bool(include_top), "count": count,
+                                     "effort": _effort_name(effort), "target": target}),
             "balance": ledger.balance(u["id"])}
 
 
 @app.post("/api/jobs/mod01")
 async def start_mod01(image: UploadFile = File(...), prompt: str = Form(""), include_top: int = Form(0),
-                      u=Depends(current_user)):
+                      effort: str = Form(""), u=Depends(current_user)):
+    eff = _effort_name(effort)
     try:
         im = imaging.load_upload(await _read_limited(image, MAX_IMAGE))
     except imaging.ImageError as e:
         raise HTTPException(400, str(e))
-    return _new_job(u, "mod01", {"prompt": prompt[:1000], "include_top": bool(include_top)},
+    return _new_job(u, "mod01", {"prompt": prompt[:1000], "include_top": bool(include_top), "effort": eff},
                     {"input_0.png": imaging.png_bytes(im)})
 
 
@@ -359,7 +371,8 @@ async def start_edit(req: Request, u=Depends(current_user)):
     if not directive and not erase:
         raise HTTPException(400, "Ne değişeceğini yaz ya da silinecek yerleri işaretle")
     return _new_job(u, "edit", {"version_id": v["id"], "directive": directive, "erase": erase,
-                                "height_mm": float(b.get("height_mm", 80))}, asset_id=v["asset_id"], version_id=v["id"])
+                                "height_mm": float(b.get("height_mm", 80)), "effort": _effort_name(b.get("effort"))},
+                    asset_id=v["asset_id"], version_id=v["id"])
 
 
 @app.get("/api/jobs")
@@ -405,6 +418,241 @@ def job_file(job_id: str, name: str, u=Depends(current_user)):
     dl = p.suffix in (".3mf", ".stl", ".zip")
     return FileResponse(p, filename=name if dl else None,
                         media_type="application/json" if p.suffix == ".json" else None)
+
+
+# ------------------------------------------------------------------ drawings (2D)
+
+def _drawing_for(u, drawing_id: str):
+    d = db.row("SELECT * FROM drawings WHERE id=? AND deleted=0", drawing_id)
+    if not d or (u["role"] != "owner" and d["user_id"] != u["id"]):
+        raise HTTPException(404, "Çizim bulunamadı")
+    return d
+
+
+def _drawing_file(d) -> Path:
+    slug = db.row("SELECT slug FROM users WHERE id=?", d["user_id"])["slug"]
+    return get_settings().files_dir / slug / "drawings" / f"{d['id']}.png"
+
+
+def _drawing_json(d) -> dict:
+    owner = db.row("SELECT name FROM users WHERE id=?", d["user_id"])["name"]
+    return {"id": d["id"], "name": d["name"], "owner": owner, "created_at": d["created_at"],
+            "updated_at": d["updated_at"], "image": f"/api/drawings/{d['id']}/image?t={int(d['updated_at'])}"}
+
+
+async def _drawing_png(image: UploadFile) -> bytes:
+    try:
+        im = imaging.load_upload(await _read_limited(image, MAX_IMAGE))
+    except imaging.ImageError as e:
+        raise HTTPException(400, str(e))
+    return imaging.png_bytes(im)
+
+
+@app.get("/api/drawings")
+def list_drawings(all: int = 0, u=Depends(current_user)):
+    if u["role"] == "owner" and all:
+        rs = db.rows("SELECT * FROM drawings WHERE deleted=0 ORDER BY updated_at DESC LIMIT 200")
+    else:
+        rs = db.rows("SELECT * FROM drawings WHERE deleted=0 AND user_id=? ORDER BY updated_at DESC LIMIT 200",
+                     u["id"])
+    return {"drawings": [_drawing_json(d) for d in rs]}
+
+
+@app.post("/api/drawings")
+async def create_drawing(image: UploadFile = File(...), name: str = Form(""), u=Depends(current_user)):
+    data = await _drawing_png(image)
+    did, t = db.new_id("drw"), db.now()
+    db.execute("INSERT INTO drawings(id,user_id,name,created_at,updated_at) VALUES(?,?,?,?,?)",
+               did, u["id"], (name.strip() or "Çizim")[:80], t, t)
+    d = db.row("SELECT * FROM drawings WHERE id=?", did)
+    p = _drawing_file(d)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return _drawing_json(d)
+
+
+@app.get("/api/drawings/{drawing_id}")
+def get_drawing(drawing_id: str, u=Depends(current_user)):
+    d = _drawing_for(u, drawing_id)
+    out = _drawing_json(d)
+    js = [r for r in db.rows("SELECT * FROM jobs WHERE user_id=? AND module='agent' ORDER BY created_at DESC"
+                             " LIMIT 200", d["user_id"]) if json.loads(r["input"]).get("drawing_id") == d["id"]]
+    out["jobs"] = [_job_json(r) for r in js[:20]]
+    out["notes"] = _notes_for("drawing_id", d["id"])
+    return out
+
+
+@app.post("/api/drawings/{drawing_id}/image")
+async def replace_drawing(drawing_id: str, image: UploadFile = File(...), u=Depends(current_user)):
+    d = _drawing_for(u, drawing_id)
+    _drawing_file(d).write_bytes(await _drawing_png(image))
+    db.execute("UPDATE drawings SET updated_at=? WHERE id=?", db.now(), d["id"])
+    return _drawing_json(db.row("SELECT * FROM drawings WHERE id=?", d["id"]))
+
+
+@app.get("/api/drawings/{drawing_id}/image")
+def drawing_image(drawing_id: str, u=Depends(current_user)):
+    p = _drawing_file(_drawing_for(u, drawing_id))
+    if not p.exists():
+        raise HTTPException(404, "Görsel yok")
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": "private, max-age=60"})
+
+
+@app.post("/api/drawings/{drawing_id}/rename")
+async def rename_drawing(drawing_id: str, req: Request, u=Depends(current_user)):
+    _drawing_for(u, drawing_id)
+    name = str((await req.json()).get("name", "")).strip()[:80]
+    if not name:
+        raise HTTPException(400, "Ad boş olamaz")
+    db.execute("UPDATE drawings SET name=?, updated_at=? WHERE id=?", name, db.now(), drawing_id)
+    return {"ok": True}
+
+
+@app.post("/api/drawings/{drawing_id}/delete")
+def delete_drawing(drawing_id: str, u=Depends(current_user)):
+    _drawing_for(u, drawing_id)
+    db.execute("UPDATE drawings SET deleted=1, updated_at=? WHERE id=?", db.now(), drawing_id)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ notes (on a 3D model or a 2D drawing)
+
+MAX_NOTE = 600
+
+
+def _note_json(n) -> dict:
+    status = n["status"]
+    if status == "sent" and n["job_id"]:     # the agent run failed or was cancelled: the note is open again
+        j = db.row("SELECT status FROM jobs WHERE id=?", n["job_id"])
+        if not j or j["status"] in ("failed", "cancelled"):
+            status = "open"
+    return {"id": n["id"], "kind": n["kind"], "asset_id": n["asset_id"], "version_id": n["version_id"],
+            "drawing_id": n["drawing_id"], "text": n["text"], "pos": json.loads(n["pos"]), "status": status,
+            "job_id": n["job_id"], "created_at": n["created_at"]}
+
+
+def _notes_for(col: str, value: str) -> list[dict]:
+    assert col in ("asset_id", "drawing_id")
+    return [_note_json(n) for n in db.rows(f"SELECT * FROM notes WHERE {col}=? ORDER BY created_at", value)]
+
+
+def _note_for(u, note_id: str):
+    n = db.row("SELECT * FROM notes WHERE id=?", note_id)
+    if not n or (u["role"] != "owner" and n["user_id"] != u["id"]):
+        raise HTTPException(404, "Not bulunamadı")
+    return n
+
+
+def _pos(kind: str, pos):
+    if pos is None:
+        return None
+    try:
+        p = [float(x) for x in pos]
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Not konumu hatalı")
+    if kind == "model" and (len(p) != 3 or any(abs(x) > 1e6 for x in p)):
+        raise HTTPException(400, "Not konumu hatalı")
+    if kind == "drawing" and (len(p) != 2 or not all(0 <= x <= 100 for x in p)):
+        raise HTTPException(400, "Not konumu hatalı")
+    return [round(x, 5) for x in p]
+
+
+@app.get("/api/notes")
+def list_notes(asset_id: str = "", drawing_id: str = "", u=Depends(current_user)):
+    if asset_id:
+        _asset_for(u, asset_id)
+        return {"notes": _notes_for("asset_id", asset_id)}
+    if drawing_id:
+        _drawing_for(u, drawing_id)
+        return {"notes": _notes_for("drawing_id", drawing_id)}
+    raise HTTPException(400, "Model ya da çizim seç")
+
+
+@app.post("/api/notes")
+async def create_note(req: Request, u=Depends(current_user)):
+    b = await req.json()
+    text = str(b.get("text", "")).strip()[:MAX_NOTE]
+    if not text:
+        raise HTTPException(400, "Not boş olamaz")
+    kind = b.get("kind")
+    asset_id = version_id = drawing_id = None
+    if kind == "model":
+        v = _version_for(u, str(b.get("version_id", "")))
+        asset_id, version_id = v["asset_id"], v["id"]
+    elif kind == "drawing":
+        drawing_id = _drawing_for(u, str(b.get("drawing_id", "")))["id"]
+    else:
+        raise HTTPException(400, "Not türü: model ya da çizim")
+    if db.row("SELECT COUNT(*) AS n FROM notes WHERE (asset_id=? OR drawing_id=?) AND status='open'",
+              asset_id, drawing_id)["n"] >= 40:
+        raise HTTPException(400, "En fazla 40 açık not")
+    nid, t = db.new_id("not"), db.now()
+    db.execute("INSERT INTO notes(id,user_id,kind,asset_id,version_id,drawing_id,text,pos,created_at,updated_at)"
+               " VALUES(?,?,?,?,?,?,?,?,?,?)", nid, u["id"], kind, asset_id, version_id, drawing_id, text,
+               json.dumps(_pos(kind, b.get("pos"))), t, t)
+    return _note_json(db.row("SELECT * FROM notes WHERE id=?", nid))
+
+
+@app.post("/api/notes/{note_id}/update")
+async def update_note(note_id: str, req: Request, u=Depends(current_user)):
+    n = _note_for(u, note_id)
+    text = str((await req.json()).get("text", "")).strip()[:MAX_NOTE]
+    if not text:
+        raise HTTPException(400, "Not boş olamaz")
+    db.execute("UPDATE notes SET text=?, status=CASE WHEN status='done' THEN 'open' ELSE status END, updated_at=?"
+               " WHERE id=?", text, db.now(), n["id"])
+    return _note_json(db.row("SELECT * FROM notes WHERE id=?", n["id"]))
+
+
+@app.post("/api/notes/{note_id}/delete")
+def delete_note(note_id: str, u=Depends(current_user)):
+    n = _note_for(u, note_id)
+    db.execute("DELETE FROM notes WHERE id=?", n["id"])
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ design agent
+
+@app.post("/api/agent")
+async def send_to_agent(req: Request, u=Depends(current_user)):
+    """Send open notes (all, or the chosen ones) to the design agent; it makes a print-ready version."""
+    b = await req.json()
+    eff = _effort_name(b.get("effort"))
+    extra = str(b.get("extra", "")).strip()[:MAX_NOTE]
+    height = b.get("height_mm")
+    if height not in (None, ""):
+        try:
+            height = float(height)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Yükseklik hatalı")
+        if not 5 <= height <= 250:
+            raise HTTPException(400, "Yükseklik 5–250 mm arasında olmalı")
+    else:
+        height = None
+    want = set(b.get("note_ids") or [])
+    files: dict[str, bytes] = {}
+    if b.get("drawing_id"):
+        d = _drawing_for(u, str(b["drawing_id"]))
+        rows = db.rows("SELECT * FROM notes WHERE drawing_id=? ORDER BY created_at", d["id"])
+        inp = {"target": "drawing", "drawing_id": d["id"], "name": d["name"]}
+        files["drawing.png"] = _drawing_file(d).read_bytes()
+        kw = {}
+    else:
+        v = _version_for(u, str(b.get("version_id", "")))
+        rows = db.rows("SELECT * FROM notes WHERE asset_id=? ORDER BY created_at", v["asset_id"])
+        # pins only make sense on the version they were placed on; pinless notes apply to any version
+        rows = [r for r in rows if r["version_id"] == v["id"] or json.loads(r["pos"]) is None]
+        inp = {"target": "model", "version_id": v["id"]}
+        kw = {"asset_id": v["asset_id"], "version_id": v["id"]}
+    rows = [r for r in rows if _note_json(r)["status"] == "open" and (not want or r["id"] in want)]
+    if not rows and not extra:
+        raise HTTPException(400, "Gönderilecek not yok; önce bir not ekle")
+    notes = [{"id": r["id"], "n": i + 1, "text": r["text"], "p": json.loads(r["pos"])} for i, r in enumerate(rows)]
+    inp.update({"notes": notes, "extra": extra, "effort": eff, "height_mm": height})
+    job = _new_job(u, "agent", inp, files, **kw)
+    for r in rows:
+        db.execute("UPDATE notes SET status='sent', job_id=?, updated_at=? WHERE id=?", job["id"], db.now(), r["id"])
+    return job
 
 
 # ------------------------------------------------------------------ owner

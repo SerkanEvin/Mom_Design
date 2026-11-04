@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 
 from . import falclient, imaging, llm, meshio
-from .config import get_settings
+from .config import effort, get_settings
 from .jobs import Job, JobFailed, add_version, blender_lock, create_asset, version_path
 
 # ------------------------------------------------------------------ prompts
@@ -60,14 +60,21 @@ CAMERAS = {
 
 def estimate(module: str, inp: dict) -> float:
     s = get_settings()
+    eff = effort(inp.get("effort"))
     rembg = falclient.estimate(s.rembg_model)
     recon = falclient.estimate(s.recon_model)
+    view = falclient.estimate(s.view_model, width=s.view_px, height=s.view_px)
     if module == "mod01":
-        views = 4 if inp.get("include_top") else 3
-        view = falclient.estimate(s.view_model, width=s.view_px, height=s.view_px)
-        return round(rembg * (1 + views) + view * views + recon + (view + rembg) * 2, 4)  # + up to 2 QA redos
+        views = 4 if inp.get("include_top") or eff["top_view"] else 3
+        redos = min(eff["qa_redos"], views)
+        return round(rembg * (1 + views) + view * views + recon + (view + rembg) * redos, 4)
     if module == "mod02":
         return round(rembg * int(inp.get("count", 1)) + recon, 4)
+    if module == "agent":
+        if inp.get("target") == "drawing":
+            # the agent decides: a flat relief is free, a figure costs a sketch render + MOD-01
+            return round(view + estimate("mod01", {"effort": eff["name"]}), 4)
+        return 0.0
     return 0.0
 
 
@@ -96,7 +103,7 @@ def _cutout(j: Job, key: str, src: Path, out: Path) -> Path:
     return out
 
 
-def _reconstruct(j: Job, images: list[Path]) -> Path:
+def _reconstruct(j: Job, images: list[Path], texture: int = 1024) -> Path:
     s = get_settings()
     out = j.dir / "model.glb"
     if out.exists():
@@ -106,7 +113,7 @@ def _reconstruct(j: Job, images: list[Path]) -> Path:
         urls = [_upload_png(p) for p in images]
         j.ctx["recon_urls"] = urls
         j.save()
-    args = {"image_urls": urls, "texture_size": 1024, "mesh_simplify": 0.95, "multiimage_algo": "stochastic"}
+    args = {"image_urls": urls, "texture_size": texture, "mesh_simplify": 0.95, "multiimage_algo": "stochastic"}
     res = j.fal("recon", s.recon_model, args, falclient.estimate(s.recon_model))
     mesh = res.get("model_mesh") or {}
     if not mesh.get("url"):
@@ -133,10 +140,16 @@ def _finish_generated(j: Job, model: Path, name: str, source: str, meta: dict, t
 # ------------------------------------------------------------------ MOD-01 single image + text
 
 def mod01(j: Job) -> None:
-    s = get_settings()
-    src = j.dir / "input_0.png"
     prompt = (j.input.get("prompt") or "").strip()
-    views = ["right", "back", "left"] + (["top"] if j.input.get("include_top") else [])
+    eff = effort(j.input.get("effort"))
+    generate_from_image(j, j.dir / "input_0.png", prompt, bool(j.input.get("include_top")), eff)
+
+
+def generate_from_image(j: Job, src: Path, prompt: str, include_top: bool, eff: dict, *,
+                        name: str | None = None, extra_meta: dict | None = None) -> dict:
+    """MOD-01 core: image + text -> views -> 3D -> new asset version. Returns the semantic spec."""
+    s = get_settings()
+    views = ["right", "back", "left"] + (["top"] if include_top or eff["top_view"] else [])
 
     if "spec" not in j.ctx:
         j.state("INTENT_EXTRACTION", "İstek anlaşılıyor")
@@ -186,8 +199,8 @@ def mod01(j: Job) -> None:
     if "qa" not in j.ctx:
         j.state("VIEW_QA", "Görünüşler kontrol ediliyor")
         qa = _qa(j, front, views)
-        bad = [v for v in views if not qa.get(v, {}).get("ok", True)][:2]
-        for v in bad:   # one redo for at most two views
+        bad = [v for v in views if not qa.get(v, {}).get("ok", True)][:eff["qa_redos"]]
+        for v in bad:   # one redo for at most `qa_redos` views (effort)
             j.ctx.setdefault("attempt", {})[v] = 1
             (j.dir / f"view_{v}.png").unlink(missing_ok=True)
             j.log(f"{v} görünüşü yeniden üretiliyor: {qa[v].get('reason', '')}")
@@ -205,9 +218,12 @@ def mod01(j: Job) -> None:
         j.log("Kullanılmayan görünüşler: " + ", ".join(dropped))
 
     j.state("3D_RECONSTRUCTION", "3B model oluşturuluyor")
-    model = _reconstruct(j, [front] + [j.dir / f"view_{v}.png" for v in good])
-    name = spec.get("name_tr") or prompt[:40] or "Yeni model"
-    _finish_generated(j, model, name, "mod01", {"prompt": prompt, "spec": spec, "views": good}, front)
+    model = _reconstruct(j, [front] + [j.dir / f"view_{v}.png" for v in good], texture=eff["texture"])
+    name = name or spec.get("name_tr") or prompt[:40] or "Yeni model"
+    _finish_generated(j, model, name, "mod01",
+                      {"prompt": prompt, "spec": spec, "views": good, "effort": eff["name"], **(extra_meta or {})},
+                      front)
+    return spec
 
 
 def _qa(j: Job, front: Path, views: list[str]) -> dict:
@@ -280,8 +296,8 @@ def _prep_paths(j: Job) -> dict:
 def prepare(j: Job) -> None:
     from . import audit, segment
     height = float(j.input.get("height_mm", 80))
-    if not 5 <= height <= 300:
-        raise JobFailed("Yükseklik 5–300 mm arasında olmalı (P2S tablası 256 mm).")
+    if not 1 <= height <= 300:
+        raise JobFailed("Yükseklik 1–300 mm arasında olmalı (P2S tablası 256 mm).")
     k = int(j.input.get("colors", 3))
     path, ver, meta = version_path(j.input["version_id"])
     j.asset_id, j.version_id = ver["asset_id"], ver["id"]
@@ -375,6 +391,11 @@ def _load_prep_job(j: Job) -> Job:
 
 # ------------------------------------------------------------------ MOD-03 Blender editor
 
+def agent_job(j: Job) -> None:
+    from . import agent
+    agent.run(j)
+
+
 def edit(j: Job) -> None:
     from . import blender
     with blender_lock():
@@ -382,4 +403,4 @@ def edit(j: Job) -> None:
 
 
 MODULES = {"mod01": mod01, "mod02": mod02, "import": import_file, "prepare": prepare,
-           "resegment": resegment, "export": export, "edit": edit}
+           "resegment": resegment, "export": export, "edit": edit, "agent": agent_job}

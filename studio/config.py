@@ -37,6 +37,24 @@ DEFAULT_PRICES: dict[str, dict] = {
 }
 
 
+# Effort levels the user picks (Orta / Yüksek / Ekstra). "high" is the behaviour from before efforts existed.
+#   edit_rounds: Blender plan → run → check rounds     qa_redos: generated views re-made after a failed check
+#   top_view:    also generate the top view (MOD-01)   texture: trellis texture size
+#   careful:     planner/agent prompts ask for an extra self-check pass
+EFFORTS: dict[str, dict] = {
+    "mid": {"label": "Orta", "edit_rounds": 2, "qa_redos": 1, "top_view": False, "texture": 1024, "careful": False},
+    "high": {"label": "Yüksek", "edit_rounds": 3, "qa_redos": 2, "top_view": False, "texture": 1024, "careful": False},
+    "extra": {"label": "Ekstra", "edit_rounds": 5, "qa_redos": 3, "top_view": True, "texture": 2048, "careful": True},
+}
+DEFAULT_EFFORT = "high"
+
+
+def effort(name: str | None) -> dict:
+    """Settings of an effort level; unknown names fall back to the default."""
+    key = name if name in EFFORTS else DEFAULT_EFFORT
+    return {"name": key, **EFFORTS[key]}
+
+
 def secret(name: str) -> str:
     """Current value of a secret: env/file first, then the copy saved from the admin page (data/secrets)."""
     s = get_settings()

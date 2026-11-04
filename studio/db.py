@@ -77,6 +77,26 @@ CREATE TABLE IF NOT EXISTS notifications (
   delivered INTEGER NOT NULL DEFAULT 0, error TEXT,
   created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS drawings (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notes (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('model','drawing')),
+  asset_id TEXT, version_id TEXT, drawing_id TEXT,
+  text TEXT NOT NULL,
+  pos TEXT NOT NULL DEFAULT 'null',
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','sent','done')),
+  job_id TEXT,
+  created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notes_asset ON notes(asset_id, status);
+CREATE INDEX IF NOT EXISTS notes_drawing ON notes(drawing_id, status);
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS llm_calls (user_id INTEGER NOT NULL, at REAL NOT NULL);
 """

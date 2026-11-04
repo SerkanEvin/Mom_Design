@@ -171,3 +171,21 @@ def recover_stale_reservations(max_age_s: int = 6 * 3600) -> None:
     db.execute("UPDATE ledger SET status='refunded', note='yarım kalan ayırma', updated_at=?"
                " WHERE kind='charge' AND status='reserved' AND fal_request_id IS NULL AND created_at<?",
                db.now(), db.now() - max_age_s)
+
+
+def usage(user_id: int) -> dict:
+    """What the header gauge shows: credit use, this hour's AI calls (members are limited), today's spend."""
+    s = get_settings()
+    u = db.row("SELECT role, unlimited FROM users WHERE id=?", user_id)
+    b = balance(user_id)
+    mine_today = db.row("SELECT COALESCE(SUM(amount_usd),0) AS s FROM ledger WHERE user_id=? AND kind='charge'"
+                        " AND status IN ('reserved','settled') AND created_at>?", user_id, time.time() - 86400)["s"]
+    ai_used = db.row("SELECT COUNT(*) AS n FROM llm_calls WHERE user_id=? AND at>?", user_id, time.time() - 3600)["n"]
+    member = bool(u) and u["role"] != "owner"
+    used = b["spent"] + b["reserved"]
+    return {
+        "credit": {"unlimited": b["unlimited"], "used": round(used, 4), "granted": b["granted"],
+                   "pct": None if b["unlimited"] or b["granted"] <= 0 else round(min(1.0, used / b["granted"]), 4)},
+        "ai_hour": {"used": int(ai_used), "limit": s.member_llm_per_hour if member else None},
+        "today": {"mine": round(mine_today, 4), "all": round(_today_spend(), 4), "cap": s.daily_cap_usd},
+    }
