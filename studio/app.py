@@ -346,9 +346,19 @@ async def start_edit(req: Request, u=Depends(current_user)):
     b = await req.json()
     v = _version_for(u, str(b.get("version_id", "")))
     directive = str(b.get("directive", "")).strip()[:1000]
-    if not directive:
-        raise HTTPException(400, "Ne değişeceğini yaz")
-    return _new_job(u, "edit", {"version_id": v["id"], "directive": directive,
+    erase = []
+    for e in (b.get("erase") or [])[:30]:
+        try:
+            p = [float(x) for x in e["p"]][:3]
+            r = float(e.get("r_mm", 3))
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "Silgi noktası hatalı")
+        if len(p) != 3 or not 0.5 <= r <= 25:
+            raise HTTPException(400, "Silgi noktası hatalı")
+        erase.append({"p": p, "r_mm": r})
+    if not directive and not erase:
+        raise HTTPException(400, "Ne değişeceğini yaz ya da silinecek yerleri işaretle")
+    return _new_job(u, "edit", {"version_id": v["id"], "directive": directive, "erase": erase,
                                 "height_mm": float(b.get("height_mm", 80))}, asset_id=v["asset_id"], version_id=v["id"])
 
 

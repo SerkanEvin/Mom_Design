@@ -65,33 +65,40 @@ def main() -> int:
             "block_is_blue": round(float((rgb[block][:, 2] > 150).mean()), 2),
             "ball_is_red": round(float((rgb[ball][:, 0] > 150).mean()), 2) if ball.any() else None,
         }
-        # the case from Serkan's test: round base first, then a name on its curved side in the next run
-        run2 = blender.validate_ops([{"op": "boolean_union", "shape": "cylinder", "size_mm": [90, 90, 10],
-                                      "center_mm": [0, 0, -4]}, {"op": "drop_to_bed"}])
+        # the case from Serkan's test: a round base and a name on its curved front side, in ONE plan
+        run2 = blender.validate_ops([{"op": "add_base", "shape": "round", "height_mm": 10, "margin_mm": 4},
+                                     {"op": "base_text", "text": "NILDA", "size_mm": 6, "depth_mm": 1.2}])
         r2 = blender.run_blender({"input": str(work / "cur1.glb"), "height_mm": None, "ops": run2,
                                   "render_dir": str(work / "r2"), "output": str(work / "edit2.glb")}, work)
         meshio.transfer_colors(Path(r2["ref"]), work / "edit2.glb", work / "cur2.glb")
-        run3 = blender.validate_ops([{"op": "emboss_text", "text": "NILDA", "anchor": {"view": "front", "u": 50, "v": 74},
-                                      "size_mm": 6, "depth_mm": 1.2}])
+        # eraser: a 5 mm sphere bitten out of the top of the ball
+        top = r2["stats"]["bbox_max_mm"][2]
+        run3 = blender.validate_ops([{"op": "erase_sphere", "center_mm": [0, 0, top], "radius_mm": 5},
+                                     {"op": "remove_loose_parts", "min_fraction": 0.02}], internal=True)
         r3 = blender.run_blender({"input": str(work / "cur2.glb"), "height_mm": None, "ops": run3,
-                                  "render_dir": str(work / "r3"), "output": str(work / "edit3.glb")}, work)
+                                  "render_dir": None, "output": str(work / "edit3.glb")}, work)
         meshio.transfer_colors(Path(r3["ref"]), work / "edit3.glb", work / "cur3.glb")
         e3 = meshio.load(work / "cur3.glb")
         c3, rgb3 = e3.triangles_center, meshio.face_rgb(e3)
         x3, y3, z3 = c3[:, 0], -c3[:, 2], c3[:, 1]
         r = np.hypot(x3, y3)
-        name = (r > 45.15) & (z3 < 8.6) & (y3 < 0)    # below the block (block starts at z=9)
+        R = float(r[(z3 > 1) & (z3 < 8) & (r > 30)].max()) if ((z3 < 8) & (r > 30)).any() else 0
+        side = (z3 > 0.5) & (z3 < 9.5) & (y3 < -10)
+        R = float(np.percentile(r[side], 50)) if side.any() else 0      # base radius (side faces)
+        name = side & (r > R + 0.3)
         out["base_text"] = {
-            "failed_ops": r2.get("failed_ops", []) + r3.get("failed_ops", []), "notes": r3.get("notes"),
-            "text_faces": int(name.sum()),
+            "failed_ops": r2.get("failed_ops", []) + r3.get("failed_ops", []), "notes": r2.get("notes"),
+            "base_radius_mm": round(R, 1), "text_faces": int(name.sum()),
             "z_range_mm": [round(float(z3[name].min()), 1), round(float(z3[name].max()), 1)] if name.any() else None,
-            "max_protrusion_mm": round(float(r[name].max() - 45), 2) if name.any() else None,
+            "max_protrusion_mm": round(float(r[name].max() - R), 2) if name.any() else None,
             "x_span_mm": round(float(x3[name].max() - x3[name].min()), 1) if name.any() else None,
             "white": round(float((rgb3[name].min(axis=1) > 230).mean()), 2) if name.any() else None,
+            "erased_top_mm": round(top - r3["stats"]["bbox_max_mm"][2], 2),
             "watertight": r3["stats"]["watertight"]}
         bt = out["base_text"]
-        base_ok = (bt["text_faces"] > 50 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 1.6
-                   and 0.5 < bt["z_range_mm"][0] and bt["z_range_mm"][1] < 10 and bt["watertight"])
+        base_ok = (bt["text_faces"] > 50 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 1.7
+                   and 0.5 < bt["z_range_mm"][0] and bt["z_range_mm"][1] < 9.6 and bt["watertight"]
+                   and bt["erased_top_mm"] > 3)
         out["base_text"]["pass"] = bool(base_ok)
         b = out["blender"]
         ok = base_ok and (b["text_faces"] > 50 and b["text_is_white"] > 0.6 and 2 < b["text_z_range_mm"][0] < b["text_z_range_mm"][1] < 18

@@ -312,14 +312,17 @@ def text_object(text, size_mm, max_width_mm):
     return t, (hi.x - lo.x), (hi.y - lo.y)
 
 
-def emboss_text(obj, o):
+def emboss_text(obj, o, centre=None, view=None):
     """Text facing the chosen view, sized to fit, every point bent onto the real surface underneath."""
-    view = o["anchor"]["view"]
+    view = view or o["anchor"]["view"]
     vw = VIEWS[view]
     lo, hi = bbox(obj)
     across = abs((hi - lo).dot(vw["right"]))
     t, w, h = text_object(o["text"], o["size_mm"], o.get("max_width_mm") or across * 0.8)
-    centre, _n, d = hit(obj, o["anchor"], search=6)
+    if centre is None:
+        centre, _n, d = hit(obj, o["anchor"], search=6)
+    else:
+        d = vw["dir"]
     depth = o["depth_mm"]
     right, up = vw["right"], vw["up"]
     base_start = centre - d * (FRAME["size"] * 2)   # rays start far in front of the anchor
@@ -361,6 +364,77 @@ def emboss_text(obj, o):
         raise RuntimeError("yazının altında yüzey yok")
     boolean(obj, t, "UNION" if depth >= 0 else "DIFFERENCE")
     return active()
+
+
+def add_base(obj, ref, shape, height, margin):
+    """Base computed from the model's own footprint: feet + margin, at least 45 % of the height wide,
+    sunk 0.8 mm into the feet, then everything dropped onto the bed."""
+    lo, hi = bbox(obj)
+    zcut = lo.z + max(2.0, 0.04 * (hi.z - lo.z))
+    pts = [v.co for v in obj.data.vertices if v.co.z <= zcut]
+    cx = (min(p.x for p in pts) + max(p.x for p in pts)) / 2
+    cy = (min(p.y for p in pts) + max(p.y for p in pts)) / 2
+    need = max(0.45 * (hi.z - lo.z) / 2, 8.0)
+    if shape == "round":
+        r = max(max(math.hypot(p.x - cx, p.y - cy) for p in pts) + margin, need)
+        size = (2 * r, 2 * r, height)
+        tool = primitive("cylinder", size, (cx, cy, lo.z - height / 2 + 0.8), (0, 0, 0))
+    else:
+        wx = max(max(p.x for p in pts) - min(p.x for p in pts) + 2 * margin, 2 * need)
+        wy = max(max(p.y for p in pts) - min(p.y for p in pts) + 2 * margin, 2 * need)
+        tool = primitive("cube", (wx, wy, height), (cx, cy, lo.z - height / 2 + 0.8), (0, 0, 0))
+    boolean(obj, tool, "UNION")
+    obj = active()
+    lo2, _ = bbox(obj)
+    for ob in (obj, ref):
+        if ob is not None:
+            translate(ob, Vector((0, 0, -lo2.z)))
+    FRAME["c"] = FRAME["c"] + Vector((0, 0, -lo2.z))
+    NOTES.append(f"{'yuvarlak' if shape == 'round' else 'kare'} taban eklendi ({size[0] if shape == 'round' else wx:.0f} mm, {height:.0f} mm yükseklik)")
+    return obj
+
+
+def base_height(obj):
+    """Height of the bottom slab, measured by rays from the front: where the front-most surface jumps back."""
+    lo, hi = bbox(obj)
+    cx = (lo.x + hi.x) / 2
+    d = Vector((0, 1, 0))
+    prev = None
+    z = lo.z + 0.25
+    while z < lo.z + 30:
+        loc, _ = cast(obj, Vector((cx, lo.y - 50, z)), d)
+        y = loc.y if loc is not None else None
+        if prev is None:
+            prev = y
+        elif y is None or y > prev + 1.5:
+            return z - lo.z - 0.25
+        z += 0.25
+    return None
+
+
+def base_text(obj, o):
+    lo, hi = bbox(obj)
+    bh = base_height(obj)
+    if not bh or bh < o["size_mm"] + 1.5:
+        raise RuntimeError(f"taban yazı için çok alçak ({(bh or 0):.1f} mm); add_base height_mm en az {o['size_mm'] + 3:.0f} olmalı")
+    cx = (lo.x + hi.x) / 2
+    loc, _ = cast(obj, Vector((cx, lo.y - 50, lo.z + bh / 2)), Vector((0, 1, 0)))
+    if loc is None:
+        raise RuntimeError("tabanın ön yüzü bulunamadı")
+    o = dict(o)
+    o.setdefault("max_width_mm", (hi.x - lo.x) * 0.7)
+    return emboss_text(obj, o, centre=loc, view="front")
+
+
+def erase_sphere(obj, center, r):
+    tool = primitive("sphere", (2 * r, 2 * r, 2 * r), center, (0, 0, 0))
+    try:
+        boolean(obj, tool, "DIFFERENCE")
+    except RuntimeError:
+        if tool.name in bpy.data.objects:      # nothing there to erase: just drop the tool
+            bpy.data.objects.remove(tool, do_unlink=True)
+        select_only(obj)
+    return obj if obj.name in bpy.data.objects else active()
 
 
 def remove_loose_parts(obj, min_fraction):
@@ -475,6 +549,12 @@ def run_op(obj, ref, o):
             apply_mod(ob, m)
     elif op == "emboss_text":
         obj = emboss_text(obj, o)
+    elif op == "add_base":
+        obj = add_base(obj, ref, o["shape"], o["height_mm"], o["margin_mm"])
+    elif op == "base_text":
+        obj = base_text(obj, o)
+    elif op == "erase_sphere":
+        obj = erase_sphere(obj, Vector(o["center_mm"]), o["radius_mm"])
     elif op == "remove_loose_parts":
         obj = remove_loose_parts(obj, o["min_fraction"])
     elif op == "drop_to_bed":

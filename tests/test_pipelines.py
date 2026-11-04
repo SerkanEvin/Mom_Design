@@ -217,18 +217,22 @@ def test_bad_uploads(client, users):
 def test_blender_ops_validation():
     import pytest
     from studio.blender import BlenderError, validate_ops
-    ok = validate_ops([{"op": "boolean_difference", "shape": "cylinder", "size_mm": [4, 4, 20], "center_mm": [0, 0, 70]},
+    ok = validate_ops([{"op": "add_base", "shape": "round", "height_mm": 8},
                        {"op": "boolean_difference", "shape": "cylinder", "size_mm": [4, 4, 20],
                         "anchor": {"view": "top", "u": 50, "v": 40}, "depth_into_mm": 8},
                        {"op": "emboss_text", "text": "ASLI", "anchor": {"view": "front", "u": 50, "v": 80}, "size_mm": 8},
                        {"op": "remove_loose_parts"},
                        {"op": "drop_to_bed"}])
-    assert ok[0]["rotation_deg"] == [0, 0, 0] and ok[1]["anchor"]["view"] == "top" and ok[2]["depth_mm"] == 1.2
+    assert ok[0]["margin_mm"] == 4 and ok[1]["anchor"]["view"] == "top" and ok[2]["depth_mm"] == 1.2
+    assert validate_ops([{"op": "erase_sphere", "center_mm": [0, 0, 5], "radius_mm": 3}], internal=True)
     for bad in ([{"op": "run_python", "code": "import os"}], [{"op": "scale", "factor": [100, 1, 1]}],
                 [{"op": "boolean_union", "shape": "teapot", "size_mm": [1, 1, 1], "center_mm": [0, 0, 0]}],
                 [{"op": "emboss_text", "text": "A", "center_mm": [0, 0, 0]}],           # text needs an anchor
                 [{"op": "emboss_text", "text": "A", "anchor": {"view": "side", "u": 1, "v": 1}}],
                 [{"op": "remesh_voxel", "voxel_mm": 0.1}],
+                [{"op": "boolean_union", "shape": "cylinder", "size_mm": [50, 50, 8], "center_mm": [0, -6, 62]}],
+                [{"op": "erase_sphere", "center_mm": [0, 0, 0], "radius_mm": 3}],          # internal only
+                [{"op": "add_base", "shape": "star"}], [{"op": "base_text", "text": " "}],
                 [{"op": "remesh_voxel", "voxel_mm": 0.5}, {"op": "remesh_voxel", "voxel_mm": 0.5}],
                 [{"op": "drop_to_bed"}] * 11):
         with pytest.raises(BlenderError):
@@ -241,3 +245,33 @@ def test_grid_overlay(tmp_path):
     Image.new("RGB", (448, 448), (230, 230, 230)).save(tmp_path / "front.png")
     out = grid_overlay(tmp_path / "front.png", tmp_path / "g.png", "front")
     assert Image.open(out).size == (448, 448)
+
+
+def test_erase_points_match_print_frame(tmp_path, users):
+    """A tap in the viewer (glTF coords) must land on the same spot in Blender's normalised frame."""
+    from studio import jobs, meshio
+    from studio.blender import _erase_ops
+    p = tmp_path / "v.glb"
+    two_colour_glb(p)                       # Y-up, box bottom at y=0 .. sphere top at y=32
+    jid = jobs.create_job(users["serkan"][0], "edit", {"erase": [{"p": [0.0, 32.0, 0.0], "r_mm": 4}]})
+    j = jobs.Job(__import__("studio").db.row("SELECT * FROM jobs WHERE id=?", jid))
+    ops = _erase_ops(j, p, "y", 64.0)       # scale x2
+    c = ops[0]["center_mm"]
+    assert abs(c[2] - 64.0) < 0.2 and abs(c[0]) < 0.2 and abs(c[1]) < 0.2 and ops[0]["radius_mm"] == 4
+    assert ops[-1]["op"] == "remove_loose_parts"
+    pm = meshio.to_print_frame(meshio.load(p), "y", 64.0)
+    assert abs(pm.bounds[1][2] - c[2]) < 0.2
+
+
+def test_edit_api_accepts_erase_only(client, users, tmp_path):
+    from studio import jobs
+    login(client, users["asli"][1])
+    p = tmp_path / "m.glb"
+    two_colour_glb(p)
+    aid = jobs.create_asset(users["asli"][0], "x", "upload")
+    vid = jobs.add_version(aid, "upload", p, {"up": "y"})
+    assert client.post("/api/jobs/edit", json={"version_id": vid}, headers=H).status_code == 400
+    r = client.post("/api/jobs/edit", json={"version_id": vid, "erase": [{"p": [1, 2, 3], "r_mm": 4}]}, headers=H)
+    assert r.status_code == 200 and r.json()["module"] == "edit"
+    assert client.post("/api/jobs/edit", json={"version_id": vid, "erase": [{"p": [1, 2], "r_mm": 4}]},
+                       headers=H).status_code == 400

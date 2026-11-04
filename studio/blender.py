@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from . import llm, meshio
@@ -54,7 +55,7 @@ def _anchor(a):
 PRIMS = {"cube", "cylinder", "sphere", "cone", "torus"}
 
 
-def validate_ops(ops) -> list[dict]:
+def validate_ops(ops, internal: bool = False) -> list[dict]:
     if not isinstance(ops, list) or len(ops) > MAX_OPS:
         raise BlenderError(f"en fazla {MAX_OPS} işlem")
     out = []
@@ -78,8 +79,10 @@ def validate_ops(ops) -> list[dict]:
             if o.get("anchor") is not None:
                 d["anchor"] = _anchor(o["anchor"])
                 d["depth_into_mm"] = _num(o.get("depth_into_mm", 0), -200, 200, "depth_into_mm")
-            else:
+            elif internal:
                 d["center_mm"] = _vec(o.get("center_mm"), -500, 500, "center_mm")
+            else:
+                raise BlenderError(f"{op} bir anchor ile verilmeli (taban için add_base kullan)")
             out.append(d)
         elif op == "remesh_voxel":
             remesh += 1
@@ -109,6 +112,21 @@ def validate_ops(ops) -> list[dict]:
             if o.get("max_width_mm") is not None:
                 d["max_width_mm"] = _num(o["max_width_mm"], 5, 300, "max_width_mm")
             out.append(d)
+        elif op == "add_base":
+            if o.get("shape", "round") not in ("round", "square"):
+                raise BlenderError("add_base shape round|square")
+            out.append({"op": op, "shape": o.get("shape", "round"),
+                        "height_mm": _num(o.get("height_mm", 4), 2, 30, "height_mm"),
+                        "margin_mm": _num(o.get("margin_mm", 4), 0, 30, "margin_mm")})
+        elif op == "base_text":
+            text = str(o.get("text", "")).strip()[:60]
+            if not text:
+                raise BlenderError("text boş")
+            out.append({"op": op, "text": text, "size_mm": _num(o.get("size_mm", 5), 3, 20, "size_mm"),
+                        "depth_mm": _num(o.get("depth_mm", 1.0), -3, 3, "depth_mm")})
+        elif op == "erase_sphere" and internal:
+            out.append({"op": op, "center_mm": _vec(o.get("center_mm"), -500, 500, "center_mm"),
+                        "radius_mm": _num(o.get("radius_mm"), 0.5, 25, "radius_mm")})
         elif op == "remove_loose_parts":
             out.append({"op": op, "min_fraction": _num(o.get("min_fraction", 0.02), 0.0001, 0.5, "min_fraction")})
         elif op == "drop_to_bed":
@@ -174,26 +192,28 @@ You get 4 renders (FRONT looks along +Y, RIGHT looks along -X, BACK looks along 
 0..100 grid: u goes left->right, v goes top->bottom. To place something ON the surface, give an anchor
 {"view": "front", "u": 50, "v": 30} pointing at the exact spot in that image; the program finds the real surface.
 
-Operations:
+Operations (prefer the first three; the program computes their geometry, you only give parameters):
+- {"op":"add_base","shape":"round|square","height_mm":4,"margin_mm":4}  base sized from the figure's feet,
+  joined under it and dropped on the bed. If a name goes on the base, height_mm >= size_mm + 3.
+- {"op":"base_text","text":"...","size_mm":5,"depth_mm":1}  name on the FRONT side of the base (needs a base,
+  can be in the same plan right after add_base). Bends around round bases.
+- {"op":"remove_loose_parts","min_fraction":0.02}  delete small floating pieces.
 - {"op":"emboss_text","text":"...","anchor":{...},"size_mm":6,"depth_mm":1.2,"max_width_mm":optional}
   raised text (negative depth = engraved) facing that view, auto-shrunk to fit. Use "\\n" for two lines.
   Put it on a flat, wide, visible area (e.g. a base front, a banner, a chest), never across thin parts.
 - {"op":"boolean_union"|"boolean_difference"|"add_primitive","shape":"cube|cylinder|sphere|cone|torus",
-   "size_mm":[x,y,z],"rotation_deg":[x,y,z], and EITHER "center_mm":[x,y,z] OR "anchor":{...},"depth_into_mm":n}
-  e.g. a round base under the figure: boolean_union cylinder size [d,d,3], center [0,0,-1.5] then drop_to_bed.
-  A hole: boolean_difference cylinder at an anchor with depth_into_mm = half its length.
-- {"op":"remove_loose_parts","min_fraction":0.02}  delete small floating pieces (specks, detached strings).
-  To cut off a thin piece that is ATTACHED (a strap, a stick), boolean_difference a small cube placed exactly
-  over that piece where it is visible in the image; a cut whose anchor misses the surface fails (it never
-  slides onto the body). Never drill through the figure.
+   "size_mm":[x,y,z],"rotation_deg":[x,y,z],"anchor":{...},"depth_into_mm":n}  (anchor is required)
+  e.g. a keychain hole: boolean_difference cylinder at an anchor, depth_into_mm = half its length.
+  Thin ATTACHED strings/straps are hard to hit from a picture: do NOT try to cut them; say so in
+  explanation_tr ("ipleri Silgi ile işaretleyip silebilirsin"). Never drill through the figure.
 - {"op":"remesh_voxel","voxel_mm":0.4}  LAST RESORT: rebuilds the surface and blurs detail. Do not use it to
   "clean" a model; use remove_loose_parts. Never below 0.3 mm, at most once.
 - {"op":"smooth","iterations":1..10,"factor":0..1}, {"op":"scale","factor":[x,y,z]}, {"op":"rotate","degrees":[x,y,z]},
   {"op":"translate","mm":[x,y,z]}, {"op":"mirror","axis":"x"}, {"op":"solidify","thickness_mm":n},
   {"op":"decimate","ratio":0..1}, {"op":"drop_to_bed"}
 Placement rules:
-- Anchors point at what is visible in THESE renders. Something you add in this same plan (a new base) is not
-  in the images yet: add it now and put text on it in the NEXT round, after you see it.
+- Anchors point at what is visible in THESE renders. For a base and a name on it use add_base + base_text
+  (both can be in one plan). Anything else you add is not in the images yet: place things on it next round.
 - Text must be at least 4 mm tall to print well. Text bends onto curved surfaces automatically.
 - Text on the SIDE of a base needs a base at least size_mm + 3 mm tall (e.g. 8-10 mm for 5 mm text); otherwise
   put it on the base's top surface in front of the figure (anchor on the TOP view) or on a flat body area.
@@ -209,10 +229,49 @@ Return JSON {"done": bool (true only if every part is satisfied), "missing": [sh
 with where], "summary_tr": one short Turkish sentence for the user}."""
 
 
+def _drop_repeats(ops: list[dict], history: list[dict], j: Job) -> list[dict]:
+    """The planner sometimes re-adds a base or re-embosses the same text; never apply those twice."""
+    done_texts = {o["text"].lower() for h in history for o in h["ops"] if o["op"] in ("emboss_text", "base_text")}
+    has_base = any(o["op"] == "add_base" for h in history for o in h["ops"])
+    out = []
+    for o in ops:
+        if o["op"] in ("emboss_text", "base_text") and o["text"].lower() in done_texts:
+            j.log(f"Tekrarlanan yazı atlandı: {o['text']}")
+            continue
+        if o["op"] == "add_base" and has_base:
+            j.log("İkinci taban eklenmedi")
+            continue
+        out.append(o)
+    return out
+
+
+def _erase_ops(j: Job, version_file: Path, up: str, height: float) -> list[dict]:
+    """Viewer tap points (glTF coords of the version file) -> print-frame mm, same transform as Blender."""
+    pts = np.array([e["p"] for e in j.input.get("erase", [])], dtype=float)
+    if not len(pts):
+        return []
+    m = meshio.geometry_only(version_file)
+    v = m.vertices.copy()
+    if up == "y":
+        R = meshio.Y_TO_Z[:3, :3]
+        v, pts = v @ R.T, pts @ R.T
+    lo, hi = v.min(axis=0), v.max(axis=0)
+    s = height / (hi[2] - lo[2])
+    v, pts = v * s, pts * s
+    lo, hi = v.min(axis=0), v.max(axis=0)
+    off = np.array([-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]])
+    pts = pts + off
+    ops = [{"op": "erase_sphere", "center_mm": p.round(3).tolist(), "radius_mm": float(e.get("r_mm", 3))}
+           for p, e in zip(pts, j.input["erase"])]
+    ops.append({"op": "remove_loose_parts", "min_fraction": 0.02})
+    return validate_ops(ops, internal=True) if len(ops) <= MAX_OPS else \
+        validate_ops(ops[:MAX_OPS - 1], internal=True) + validate_ops(ops[-1:], internal=True)
+
+
 def edit_loop(j: Job) -> None:
     directive = (j.input.get("directive") or "").strip()
-    if not directive:
-        raise JobFailed("Ne değişeceğini yaz.")
+    if not directive and not j.input.get("erase"):
+        raise JobFailed("Ne değişeceğini yaz ya da silinecek yerleri işaretle.")
     height = float(j.input.get("height_mm", 80))
     path, ver, meta = version_path(j.input["version_id"])
     j.asset_id = ver["asset_id"]
@@ -230,7 +289,19 @@ def edit_loop(j: Job) -> None:
         j.save()
 
     history = j.ctx["history"]
-    while len(history) < MAX_ROUNDS:
+    if j.input.get("erase") and not j.ctx.get("erased"):
+        j.state("MCP_EXECUTION", "İşaretlenen yerler siliniyor")
+        ops = _erase_ops(j, path, meta.get("up", "y"), height)
+        res = run_blender({"input": j.ctx["current"], "height_mm": None, "ops": ops,
+                           "render_dir": str(work / "re"), "output": str(work / "erase.glb")}, work)
+        meshio.transfer_colors(Path(res["ref"]), work / "erase.glb", work / "cur_e.glb")
+        for n in res.get("notes", []):
+            j.log("Not: " + n)
+        history.append({"ops": ops, "note": f"{len(j.input['erase'])} işaretli yer silindi", "stats": res["stats"]})
+        j.ctx.update({"current": str(work / "cur_e.glb"), "renders": res["renders"], "stats": res["stats"],
+                      "changed": True, "erased": True})
+        j.save()
+    while directive and len(history) < MAX_ROUNDS + (1 if j.ctx.get("erased") else 0):
         rnd = len(history)
         j.state("MULTI_MODAL_ANALYSIS", f"Plan hazırlanıyor (tur {rnd + 1})")
         content = _views_content(j.ctx["renders"], work, f"p{rnd}")
@@ -242,7 +313,7 @@ def edit_loop(j: Job) -> None:
             "still_missing": j.ctx.get("missing")}, ensure_ascii=False)})
         plan = llm.chat_json(PLANNER_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=3000)
         try:
-            ops = validate_ops(plan.get("ops") or [])
+            ops = _drop_repeats(validate_ops(plan.get("ops") or []), history, j)
         except BlenderError as e:
             history.append({"ops": [], "note": f"geçersiz plan: {e}"})
             j.log(f"Plan reddedildi: {e}")

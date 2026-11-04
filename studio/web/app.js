@@ -480,20 +480,54 @@ function waitJob(id, onDone, onProgress) {
 async function editPage(id) {
   const a = await api(`/api/assets/${id}`);
   const ver = chosenVersion(a, id);
-  const el = h(`<section class="stack" style="max-width:720px"><div class="row"><a href="#/a/${id}" class="small">← ${esc(a.name)}</a></div>
-    <h1>Düzenle</h1><div class="card stack">
-      <p class="muted">Modelde neyi değiştirmek istediğini yaz. Atölye Blender'da düzenler, sonucu yeni sürüm olarak kaydeder (v${ver.n} korunur).</p>
-      <div class="examples" id="ex"></div>
-      <label class="field"><span>İstek</span><textarea id="dir" maxlength="1000" placeholder="Örn: Altına 3 mm kalınlığında yuvarlak bir taban ekle ve üstüne ASLI yaz."></textarea></label>
-      <label class="field"><span>Model yüksekliği (mm)</span><input type="number" id="hmm" value="${ver.meta?.height_mm || 80}" min="5" max="250"></label>
-      <button id="go">Düzenle</button><p class="small muted">Ücretsiz (yapay zekâ + Blender). 1–5 dakika.</p></div></section>`);
+  const el = h(`<section class="stack"><div class="row"><a href="#/a/${id}" class="small">← ${esc(a.name)}</a></div>
+    <h1>Düzenle</h1>
+    <div class="split"><div class="stack"><div id="vbox"></div>
+        <div class="row"><div class="seg" id="tool"><button data-t="look" class="on">Döndür</button><button data-t="erase">🧽 Silgi</button></div>
+          <select id="brush" style="max-width:150px"><option value="2">Silgi 2 mm</option><option value="4" selected>Silgi 4 mm</option><option value="8">Silgi 8 mm</option></select>
+          <button class="ghost small" id="undo">Geri al</button><span class="small muted" id="cnt"></span></div>
+        <p class="small muted">Silgi: modelde istemediğin ip, çubuk ya da çıkıntıya dokun; kırmızı işaretler silinecek yerlerdir.</p></div>
+      <div class="card stack">
+        <p class="muted">Yazılı istekleri yapay zekâ Blender'da uygular; silgi işaretlerini doğrudan siler. Sonuç yeni sürüm olur (v${ver.n} korunur).</p>
+        <div class="examples" id="ex"></div>
+        <label class="field"><span>İstek (isteğe bağlı)</span><textarea id="dir" maxlength="1000" placeholder="Örn: Altına 8 mm yuvarlak taban ekle ve tabanın önüne ASLI yaz."></textarea></label>
+        <label class="field"><span>Model yüksekliği (mm)</span><input type="number" id="hmm" value="${Math.round(ver.meta?.height_mm || 80)}" min="5" max="250"></label>
+        <button id="go">Uygula</button><p class="small muted">Ücretsiz (yapay zekâ + Blender). 1–5 dakika.</p></div></div></section>`);
   app.append(el);
-  ["Altına düz bir taban ekle", "Anahtarlık için üstüne 4 mm delik aç", "Ön yüzüne ismimi kabartma yaz", "Yüzeyi biraz yumuşat", "Modeli içi boş yap (2 mm duvar)"].forEach(t => {
+  ["Altına 8 mm yuvarlak taban ekle ve önüne ismimi yaz", "Altına düz kare taban ekle", "Anahtarlık için üstüne 4 mm delik aç", "Boşta duran küçük parçaları temizle"].forEach(t => {
     const b = h(`<button type="button">${esc(t)}</button>`); b.onclick = () => ($("#dir", el).value = t); $("#ex", el).append(b);
   });
+  const vb = viewerBox("Silgi seçiliyken dokunduğun yer işaretlenir"); $("#vbox", el).append(vb);
+  activeViewer = new Viewer(vb);
+  let model = null; const marks = []; let tool = "look";
+  try { model = await activeViewer.load(ver.url); $(".loading", vb).hidden = true; } catch { $(".loading", vb).textContent = "Model açılamadı."; }
+  const count = () => ($("#cnt", el).textContent = marks.length ? `${marks.length} işaret` : "");
+  $("#tool", el).onclick = e => { const b = e.target.closest("button"); if (!b) return; tool = b.dataset.t; $("#tool", el).querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); };
+  $("#undo", el).onclick = () => { const m = marks.pop(); if (m) activeViewer.root.remove(m.mesh); count(); };
+  const canvas = activeViewer.renderer.domElement; const ray = new THREE.Raycaster(); let down = null;
+  canvas.addEventListener("pointerdown", e => (down = [e.clientX, e.clientY]));
+  canvas.addEventListener("pointerup", e => {
+    if (tool !== "erase" || !model || !down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;
+    if (marks.length >= 30) return toast("En fazla 30 işaret");
+    const r = canvas.getBoundingClientRect();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), activeViewer.camera);
+    const hit = ray.intersectObject(model, true)[0]; if (!hit) return;
+    const p = hit.point.clone().sub(model.position);          // back to the file's own coordinates
+    const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3());
+    const mmPerUnit = (+$("#hmm", el).value || 80) / (size.y || 1);
+    const rmm = +$("#brush", el).value;
+    const s = new THREE.Mesh(new THREE.SphereGeometry(rmm / mmPerUnit, 16, 12), new THREE.MeshBasicMaterial({ color: 0xe5484d, transparent: true, opacity: 0.55 }));
+    s.position.copy(hit.point); activeViewer.root.add(s);
+    marks.push({ p: [p.x, p.y, p.z], r_mm: rmm, mesh: s }); count();
+  });
   $("#go", el).onclick = async () => {
-    try { const j = await api("/api/jobs/edit", { body: { version_id: ver.id, directive: $("#dir", el).value, height_mm: +$("#hmm", el).value } }); location.hash = `#/job/${j.id}`; }
-    catch (e) { toast(e.message); }
+    const directive = $("#dir", el).value.trim();
+    if (!directive && !marks.length) return toast("Bir istek yaz ya da silinecek yerleri işaretle");
+    try {
+      const j = await api("/api/jobs/edit", { body: { version_id: ver.id, directive, height_mm: +$("#hmm", el).value,
+        erase: marks.map(m => ({ p: m.p, r_mm: m.r_mm })) } });
+      location.hash = `#/job/${j.id}`;
+    } catch (e) { toast(e.message); }
   };
 }
 
