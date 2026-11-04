@@ -93,12 +93,12 @@ def main() -> int:
             "max_protrusion_mm": round(float(r[name].max() - R), 2) if name.any() else None,
             "x_span_mm": round(float(x3[name].max() - x3[name].min()), 1) if name.any() else None,
             "white": round(float((rgb3[name].min(axis=1) > 230).mean()), 2) if name.any() else None,
-            "erased_top_mm": round(top - r3["stats"]["bbox_max_mm"][2], 2),
+            "erased_cm3": round((r2["stats"]["volume_cm3"] or 0) - (r3["stats"]["volume_cm3"] or 0), 3),
             "watertight": r3["stats"]["watertight"]}
         bt = out["base_text"]
         base_ok = (bt["text_faces"] > 50 and not bt["failed_ops"] and bt["max_protrusion_mm"] < 1.7
                    and 0.5 < bt["z_range_mm"][0] and bt["z_range_mm"][1] < 9.6 and bt["watertight"]
-                   and bt["erased_top_mm"] > 3)
+                   and bt["erased_cm3"] > 0.05)
         out["base_text"]["pass"] = bool(base_ok)
         b = out["blender"]
         ok = base_ok and (b["text_faces"] > 50 and b["text_is_white"] > 0.6 and 2 < b["text_z_range_mm"][0] < b["text_z_range_mm"][1] < 18
