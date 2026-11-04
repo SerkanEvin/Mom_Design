@@ -152,13 +152,16 @@ def test_mod01_full_flow_then_print(client, users, monkeypatch, tmp_path):
     labels = arrays["labels"]
     labels[0] = 2   # user painted a region with slot 3
     r = client.post("/api/jobs/export", json={"prep_job": pid, "labels": labels, "palette": ["#ff0000", "#0000ff", "#00ff00"],
-                                              "mode": "painted", "name": "yumurta"}, headers=H)
+                                              "mode": "painted", "name": "Kırmızı başlı figür"}, headers=H)
     eid = r.json()["id"]
     run_queued()
     e = client.get(f"/api/jobs/{eid}").json()
     assert e["status"] == "done", e
     f = e["result"]["files"][0]
-    data = client.get(f"/api/jobs/{eid}/files/{f}").content
+    assert f == "Kırmızı_başlı_figür_boyali.3mf"
+    resp = client.get(f"/api/jobs/{eid}/files/{f}")
+    assert resp.status_code == 200
+    data = resp.content
     from studio.threemf import read_painted_labels
     codes = read_painted_labels(data)
     assert len(codes) == len(labels) and codes[0] == "0C" and "8" in codes

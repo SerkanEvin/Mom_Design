@@ -342,7 +342,8 @@ def export(j: Job) -> None:
     palette = [str(c) for c in (j.input.get("palette") or [])][:16]
     while len(palette) <= labels.max():
         palette.append("#cccccc")
-    name = (j.input.get("name") or "model").replace("/", "_")[:40]
+    import re
+    name = re.sub(r"[^\w.\-]+", "_", (j.input.get("name") or "model")).strip("._")[:40] or "model"
     mode = j.input.get("mode", "painted")
     j.state("EXPORT_HANDOFF", "Baskı dosyası hazırlanıyor")
     if mode == "painted":
