@@ -188,8 +188,16 @@ Operations:
 - {"op":"smooth","iterations":1..10,"factor":0..1}, {"op":"scale","factor":[x,y,z]}, {"op":"rotate","degrees":[x,y,z]},
   {"op":"translate","mm":[x,y,z]}, {"op":"mirror","axis":"x"}, {"op":"solidify","thickness_mm":n},
   {"op":"decimate","ratio":0..1}, {"op":"drop_to_bed"}
-Rules: operations already applied are permanent; NEVER repeat them. Only do what the request asks. Keep the
-figure's details. Return JSON {"ops": [...], "explanation_tr": one short Turkish sentence}."""
+Placement rules:
+- Anchors point at what is visible in THESE renders. Something you add in this same plan (a new base) is not
+  in the images yet: add it now and put text on it in the NEXT round, after you see it.
+- Text must be at least 4 mm tall to print well. Text bends onto curved surfaces automatically.
+- Text on the SIDE of a base needs a base at least size_mm + 3 mm tall (e.g. 8-10 mm for 5 mm text); otherwise
+  put it on the base's top surface in front of the figure (anchor on the TOP view) or on a flat body area.
+- A base is a cylinder/cube unioned under the figure that overlaps the feet by ~1 mm, then drop_to_bed.
+Rules: operations already applied are permanent; NEVER repeat them (see rounds_so_far). If an op failed, read
+its error and fix that op only. Only do what the request asks. Keep the figure's details.
+Return JSON {"ops": [...], "explanation_tr": one short Turkish sentence}."""
 
 CHECK_SYSTEM = """You check an edited 3D figure against the user's request. You get the request, the operations
 already applied, and 4 renders of the result (FRONT, RIGHT, BACK, TOP with a 0..100 grid). For each part of the
@@ -225,7 +233,8 @@ def edit_loop(j: Job) -> None:
         content = _views_content(j.ctx["renders"], work, f"p{rnd}")
         content.append({"type": "text", "text": json.dumps({
             "request": directive, "model": about, "stats_mm": j.ctx["stats"],
-            "rounds_so_far": [{"ops": h["ops"], "note": h.get("note"), "failed": h.get("failed", False)}
+            "rounds_so_far": [{"applied_ops": h["ops"], "note": h.get("note"),
+                               "failed_ops": h.get("failed_ops", []), "runner_notes": h.get("notes", [])}
                               for h in history],
             "still_missing": j.ctx.get("missing")}, ensure_ascii=False)})
         plan = llm.chat_json(PLANNER_SYSTEM, content, vision=True, user_id=j.user_id, max_tokens=3000)
@@ -250,11 +259,20 @@ def edit_loop(j: Job) -> None:
             j.log(f"Bu adım uygulanamadı: {e}")
             j.save()
             continue
-        colored = work / f"cur{rnd + 1}.glb"
-        tr = meshio.transfer_colors(Path(res["ref"]), out_glb, colored)
+        failed = res.get("failed_ops") or []
+        applied = [o for i, o in enumerate(ops) if i not in {f["index"] for f in failed}]
+        for f in failed:
+            j.log(f"Atlanan adım ({f['op']}): {f['error']}")
         for n in res.get("notes", []):
             j.log("Not: " + n)
-        history.append({"ops": ops, "note": plan.get("explanation_tr"), "stats": res["stats"], "colours": tr})
+        if not applied:
+            history.append({"ops": [], "note": "hiçbir adım uygulanamadı", "failed_ops": failed, "failed": True})
+            j.save()
+            continue
+        colored = work / f"cur{rnd + 1}.glb"
+        tr = meshio.transfer_colors(Path(res["ref"]), out_glb, colored)
+        history.append({"ops": applied, "note": plan.get("explanation_tr"), "stats": res["stats"], "colours": tr,
+                        "failed_ops": failed, "notes": res.get("notes", [])})
         j.ctx.update({"current": str(colored), "renders": res["renders"], "stats": res["stats"], "changed": True})
         j.save()
 

@@ -143,11 +143,19 @@ def cast(obj, origin, direction, max_dist=1e5):
 
 
 def hit(obj, anchor):
-    origin, d = ray_point(anchor["view"], anchor["u"], anchor["v"])
-    loc, n = cast(obj, origin, d)
-    if loc is None:
-        raise RuntimeError(f"no surface at {anchor['view']} ({anchor['u']:.0f}, {anchor['v']:.0f})")
-    return loc, n, d
+    """Surface point under an anchor; if the ray just misses, look up to 10 grid units around it."""
+    u0, v0 = anchor["u"], anchor["v"]
+    for r in (0, 2, 4, 6, 8, 10):
+        steps = [(0, 0)] if r == 0 else [(r * math.cos(a), r * math.sin(a)) for a in
+                                          (k * math.pi / 4 for k in range(8))]
+        for du, dv in steps:
+            origin, d = ray_point(anchor["view"], u0 + du, v0 + dv)
+            loc, n = cast(obj, origin, d)
+            if loc is not None:
+                if r:
+                    NOTES.append(f"işaret ({u0:.0f},{v0:.0f}) yüzeye denk gelmedi, ({u0 + du:.0f},{v0 + dv:.0f}) kullanıldı")
+                return loc, n, d
+    raise RuntimeError(f"{anchor['view']} görünüşünde ({u0:.0f}, {v0:.0f}) çevresinde yüzey yok")
 
 
 def thickness_from(obj, loc, d):
@@ -206,6 +214,7 @@ def primitive_center(obj, o):
 
 
 def text_object(text, size_mm, max_width_mm):
+    """Text mesh in local coords: footprint centred on x/y, z from 0 (back) to 1 (front), finely subdivided."""
     bpy.ops.object.text_add()
     t = active()
     t.data.body = text.replace("\\n", "\n")
@@ -213,14 +222,14 @@ def text_object(text, size_mm, max_width_mm):
     t.data.align_x = "CENTER"
     t.data.align_y = "CENTER"
     t.data.extrude = 0.5
+    t.data.resolution_u = 6
     bpy.ops.object.convert(target="MESH")
     t = active()
-    w, h = t.dimensions.x, t.dimensions.y
+    w = t.dimensions.x
     scale = 1.0
     if max_width_mm and w > max_width_mm:
         scale = max_width_mm / w
         NOTES.append(f"yazı {w:.0f} mm genişti, {max_width_mm:.0f} mm'ye sığdırıldı")
-    # normalise: footprint centred on origin, depth from z=0 (back) to z=1 (front)
     select_only(t)
     t.scale = (scale, scale, 1.0)
     bpy.ops.object.transform_apply(scale=True)
@@ -229,57 +238,70 @@ def text_object(text, size_mm, max_width_mm):
     lo, hi = bbox(t)
     t.scale = (1, 1, 1.0 / max(hi.z - lo.z, 1e-6))
     bpy.ops.object.transform_apply(scale=True)
+    # dense enough to bend over curved surfaces
+    bm = bmesh.new()
+    bm.from_mesh(t.data)
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    for _ in range(4):
+        long_edges = [e for e in bm.edges if e.calc_length() > 0.6 and
+                      abs(e.verts[0].co.z - e.verts[1].co.z) < 1e-6]
+        if not long_edges:
+            break
+        bmesh.ops.subdivide_edges(bm, edges=long_edges, cuts=1, use_grid_fill=False)
+        bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    bm.to_mesh(t.data)
+    bm.free()
+    lo, hi = bbox(t)
     return t, (hi.x - lo.x), (hi.y - lo.y)
 
 
 def emboss_text(obj, o):
-    """Text facing the chosen view, sized to fit, touching the real surface across its whole footprint."""
+    """Text facing the chosen view, sized to fit, every point bent onto the real surface underneath."""
     view = o["anchor"]["view"]
     vw = VIEWS[view]
     lo, hi = bbox(obj)
     across = abs((hi - lo).dot(vw["right"]))
-    max_w = o.get("max_width_mm") or across * 0.8
-    t, w, h = text_object(o["text"], o["size_mm"], max_w)
+    t, w, h = text_object(o["text"], o["size_mm"], o.get("max_width_mm") or across * 0.8)
     centre, _n, d = hit(obj, o["anchor"])
-    # probe the footprint: where is the surface under each part of the text (along the view direction)?
-    depths, exits = [], []
-    origin0 = centre - d * (FRAME["size"] * 2)
-    for fu in (-0.5, -0.25, 0.0, 0.25, 0.5):
-        for fv in (-0.5, 0.0, 0.5):
-            p = origin0 + vw["right"] * (fu * w) + vw["up"] * (fv * h)
-            loc, _ = cast(obj, p, d)
-            if loc is None:
-                continue
-            depths.append((loc - origin0).dot(d))
-            exits.append((loc - origin0).dot(d) + thickness_from(obj, loc, d))
-    if len(depths) < 6:
-        NOTES.append("yazının bir kısmı yüzeyin dışına taşıyor")
-    if not depths:
-        raise RuntimeError("yazı için yüzey bulunamadı")
-    t_out, t_in = min(depths), max(depths)       # outermost / innermost surface point under the text
     depth = o["depth_mm"]
-    if depth >= 0:   # emboss: from depth mm in front of the outermost point to 0.8 mm inside the innermost
-        front, back = t_out - depth, t_in + 0.8
-        back = min(back, min(exits) - 0.6) if exits else back
-        back = max(back, t_out + 0.3)
-    else:            # engrave: from outside to |depth| below the mid surface
-        front, back = t_out - 1.0, (t_out + t_in) / 2 + abs(depth)
-    if t_in - t_out > 4:
-        NOTES.append("yüzey yazının altında çok kavisli; yazı düz bir plaka gibi oturur")
-    # orient: text +Z (front face) must point back toward the camera (-d); image right/up = text x/y
+    right, up = vw["right"], vw["up"]
+    base_start = centre - d * (FRAME["size"] * 2)   # rays start far in front of the anchor
+    cache = {}
+    misses = 0
+
+    def surface(px, py):
+        """(depth along d from the start plane, wall thickness) of the surface under text point (px, py)."""
+        key = (round(px, 2), round(py, 2))
+        if key not in cache:
+            start = base_start + right * px + up * py
+            loc, _ = cast(obj, start, d)
+            cache[key] = None if loc is None else ((loc - start).dot(d), thickness_from(obj, loc, d))
+        return cache[key]
+
+    me = t.data
+    for v in me.vertices:
+        x, y, z = v.co.x, v.co.y, v.co.z            # z: 0 back .. 1 front
+        sres = surface(x, y)
+        if sres is None:
+            misses += 1
+            ts, thick = (centre - base_start).dot(d), 1e9
+        else:
+            ts, thick = sres
+        if depth >= 0:
+            embed = max(0.2, min(0.8, thick - 0.4))
+            tt = ts + embed - z * (embed + depth)
+        else:
+            tt = ts + abs(depth) - z * (abs(depth) + 1.0)
+        v.co = base_start + right * x + up * y + d * tt
+    me.update()
     select_only(t)
-    t.scale = (1, 1, back - front)
-    bpy.ops.object.transform_apply(scale=True)
-    t.rotation_euler = [math.radians(a) for a in vw["rot"]]
-    bpy.ops.object.transform_apply(rotation=True)
-    # after rotation the text spans 0..(back-front) along -d; put its front face at depth `front`
-    lo_t, hi_t = bbox(t)
-    front_now = min((Vector((x, y, z)) - origin0).dot(d) for x in (lo_t.x, hi_t.x) for y in (lo_t.y, hi_t.y)
-                    for z in (lo_t.z, hi_t.z))
-    mid_now = (lo_t + hi_t) / 2
-    in_plane = (mid_now - origin0) - d * (mid_now - origin0).dot(d)
-    target_plane = (centre - origin0) - d * (centre - origin0).dot(d)
-    translate(t, (target_plane - in_plane) + d * (front - front_now))
+    t.location = (0, 0, 0)
+    t.rotation_euler = (0, 0, 0)
+    if misses > len(me.vertices) * 0.15:
+        NOTES.append("yazının bir kısmı yüzeyin dışına taşıyor; daha küçük ya da daha ortada olmalı")
+    if misses == len(me.vertices):
+        bpy.data.objects.remove(t, do_unlink=True)
+        raise RuntimeError("yazının altında yüzey yok")
     boolean(obj, t, "UNION" if depth >= 0 else "DIFFERENCE")
     return active()
 
@@ -321,66 +343,89 @@ def whole_object(objs, fn):
             fn(ob)
 
 
+FAILED = []
+
+
+def cleanup(obj, ref):
+    for ob in list(bpy.context.scene.objects):
+        if ob is not obj and ob is not ref and ob.type in ("MESH", "FONT", "CURVE"):
+            bpy.data.objects.remove(ob, do_unlink=True)
+    if bpy.context.object and bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    select_only(obj)
+
+
 def run_ops(obj, ref, ops):
-    for o in ops:
-        op = o["op"]
-        select_only(obj)
-        if op == "scale":
-            def f(ob):
-                ob.scale = o["factor"]
-                bpy.ops.object.transform_apply(scale=True)
-            whole_object([obj, ref], f)
-        elif op == "rotate":
-            def f(ob):
-                ob.rotation_euler = [math.radians(a) for a in o["degrees"]]
-                bpy.ops.object.transform_apply(rotation=True)
-            whole_object([obj, ref], f)
-        elif op == "translate":
-            for ob in (obj, ref):
-                translate(ob, Vector(o["mm"]))
-        elif op in ("boolean_difference", "boolean_union", "add_primitive"):
-            tool = primitive(o["shape"], o["size_mm"], primitive_center(obj, o), o["rotation_deg"])
-            if op == "add_primitive":
-                join(obj, tool)
-            else:
-                boolean(obj, tool, "DIFFERENCE" if op == "boolean_difference" else "UNION")
-        elif op == "remesh_voxel":
-            m = obj.modifiers.new("remesh", "REMESH")
-            m.mode = "VOXEL"
-            m.voxel_size = o["voxel_mm"]
-            apply_mod(obj, m)
-        elif op == "decimate":
-            m = obj.modifiers.new("dec", "DECIMATE")
-            m.ratio = o["ratio"]
-            apply_mod(obj, m)
-        elif op == "subdivide":
-            m = obj.modifiers.new("sub", "SUBSURF")
-            m.levels = o["levels"]
-            m.render_levels = o["levels"]
-            apply_mod(obj, m)
-        elif op == "smooth":
-            m = obj.modifiers.new("smooth", "SMOOTH")
-            m.iterations = o["iterations"]
-            m.factor = o["factor"]
-            apply_mod(obj, m)
-        elif op == "solidify":
-            m = obj.modifiers.new("solid", "SOLIDIFY")
-            m.thickness = o["thickness_mm"]
-            apply_mod(obj, m)
-        elif op == "mirror":
-            for ob in (obj, ref):
-                m = ob.modifiers.new("mirror", "MIRROR")
-                m.use_axis = [o["axis"] == "x", o["axis"] == "y", o["axis"] == "z"]
-                apply_mod(ob, m)
-        elif op == "emboss_text":
-            obj = emboss_text(obj, o)
-        elif op == "remove_loose_parts":
-            obj = remove_loose_parts(obj, o["min_fraction"])
-        elif op == "drop_to_bed":
-            lo, _ = bbox(obj)
-            for ob in (obj, ref):
-                translate(ob, Vector((0, 0, -lo.z)))
-        obj = active() if active() is not ref else obj
+    for i, o in enumerate(ops):
+        try:
+            obj = run_op(obj, ref, o)
+        except Exception as e:
+            FAILED.append({"index": i, "op": o["op"], "error": f"{e}"[:200]})
+            cleanup(obj, ref)
+    return obj
+
+
+def run_op(obj, ref, o):
+    op = o["op"]
+    select_only(obj)
+    if op == "scale":
+        def f(ob):
+            ob.scale = o["factor"]
+            bpy.ops.object.transform_apply(scale=True)
+        whole_object([obj, ref], f)
+    elif op == "rotate":
+        def f(ob):
+            ob.rotation_euler = [math.radians(a) for a in o["degrees"]]
+            bpy.ops.object.transform_apply(rotation=True)
+        whole_object([obj, ref], f)
+    elif op == "translate":
+        for ob in (obj, ref):
+            translate(ob, Vector(o["mm"]))
+        FRAME["c"] = FRAME["c"] + Vector(o["mm"])     # anchors stay glued to the model
+    elif op in ("boolean_difference", "boolean_union", "add_primitive"):
+        tool = primitive(o["shape"], o["size_mm"], primitive_center(obj, o), o["rotation_deg"])
+        if op == "add_primitive":
+            join(obj, tool)
+        else:
+            boolean(obj, tool, "DIFFERENCE" if op == "boolean_difference" else "UNION")
+    elif op == "remesh_voxel":
+        m = obj.modifiers.new("remesh", "REMESH")
+        m.mode = "VOXEL"
+        m.voxel_size = o["voxel_mm"]
+        apply_mod(obj, m)
+    elif op == "decimate":
+        m = obj.modifiers.new("dec", "DECIMATE")
+        m.ratio = o["ratio"]
+        apply_mod(obj, m)
+    elif op == "subdivide":
+        m = obj.modifiers.new("sub", "SUBSURF")
+        m.levels = o["levels"]
+        m.render_levels = o["levels"]
+        apply_mod(obj, m)
+    elif op == "smooth":
+        m = obj.modifiers.new("smooth", "SMOOTH")
+        m.iterations = o["iterations"]
+        m.factor = o["factor"]
+        apply_mod(obj, m)
+    elif op == "solidify":
+        m = obj.modifiers.new("solid", "SOLIDIFY")
+        m.thickness = o["thickness_mm"]
+        apply_mod(obj, m)
+    elif op == "mirror":
+        for ob in (obj, ref):
+            m = ob.modifiers.new("mirror", "MIRROR")
+            m.use_axis = [o["axis"] == "x", o["axis"] == "y", o["axis"] == "z"]
+            apply_mod(ob, m)
+    elif op == "emboss_text":
+        obj = emboss_text(obj, o)
+    elif op == "remove_loose_parts":
+        obj = remove_loose_parts(obj, o["min_fraction"])
+    elif op == "drop_to_bed":
+        lo, _ = bbox(obj)
+        for ob in (obj, ref):
+            translate(ob, Vector((0, 0, -lo.z)))
+        FRAME["c"] = FRAME["c"] + Vector((0, 0, -lo.z))
+    obj = active() if active() is not ref else obj
     return obj
 
 
@@ -486,7 +531,7 @@ def main():
         bpy.context.collection.objects.link(ref)
         ref.hide_render = True
     obj = run_ops(obj, ref, SPEC.get("ops") or [])
-    out = {"ok": True, "stats": stats(obj), "notes": NOTES}
+    out = {"ok": True, "stats": stats(obj), "notes": NOTES, "failed_ops": FAILED}
     if SPEC.get("render_dir"):
         lo, hi = bbox(obj)
         FRAME.update(c=(lo + hi) / 2, size=max(hi - lo) * 1.35)
