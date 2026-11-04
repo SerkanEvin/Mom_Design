@@ -1,0 +1,15 @@
+cadquery-ocp==8.0.1.1.0
+fal-client==1.0.3
+fast-simplification==0.2.0
+fastapi==0.162.0
+httpx==0.28.1
+manifold3d==3.5.4
+networkx==3.7
+numpy==2.5.4
+pillow==13.0.0
+python-multipart==0.0.33
+rtree==1.4.1
+scikit-image==0.26.0
+scipy==1.18.1
+trimesh==5.2.0
+uvicorn==0.54.0

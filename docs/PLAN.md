@@ -1,6 +1,6 @@
 # Mom_Design — 3D Generative & CAD Modification Engine on aicp
 
-Implementation plan · 2026-11-04 · status: **draft, waiting for Serkan's decisions (§9)**
+Implementation plan · 2026-11-04 · status: **decided and built (see §10 for what changed from the draft)**
 
 This plan places the spec "Autonomous 3D Generative & CAD Modification Engine v1.0.0" (MOD-01…MOD-04) on top of the
 current aicp system, with two accounts: **Serkan** (unlimited) and **Aslı** (5 USD fal.ai budget).
@@ -253,3 +253,31 @@ at 390 px and 1280 px, one real end-to-end job per module with its cost shown in
 5. **When Aslı's balance runs out:** hard stop and ask Serkan *(recommended)*, or auto top-up?
 6. **Agents:** create `studio-editor` (and optionally `studio-gelistirici`), or hand the build to `aicp-gelistirici`?
 7. **fal balance:** what is the current balance? It must cover Aslı's 5 $ plus development (~1 $).
+
+---
+
+## 10. Serkan's decisions (2026-11-04) and what was built
+
+| # | Decision | Built as |
+|---|---|---|
+| 1 | Member role; Aslı logs in with a key and sees **only** the designer app at `asli.serkan.work` | The studio is its **own small web app** with its own `owner`/`member` accounts, served only at `asli.serkan.work`. aicp is not opened to Aslı at all, so its agents and root repair stay out of her reach |
+| 2 | Use a server-side fal key | Read from `FAL_KEY_FILE` or pasted once into **Yönetim → fal anahtarı** (saved 0600 in the app volume). infra could not find an existing key file in the places it can read |
+| 3 | 5 $ covers fal only | Ledger counts fal spend only. Synthetic calls are rate-limited for members (60/hour) |
+| 4 | 4 AMS slots | Colour regions are capped at 4 in the UI (the 3MF encoder supports up to 16) |
+| 5 | Auto top-up, Serkan is notified, Aslı never pays | When a reservation doesn't fit, +5 $ is granted automatically and Serkan gets a `warn` notification. Also: a note at 80 % use, a 3 $/day cap across all users, and a warning as the real fal balance (9 $) runs low |
+| 6 | Claude builds everything | No new aicp agents. MOD-03's agent loop runs inside the studio worker (planner `syn:large:vision` → whitelisted Blender ops) |
+| 7 | fal balance 9 $ | `STUDIO_FAL_BALANCE_USD=9`. Editable in Yönetim after a top-up |
+
+### Components (this repo)
+- `studio/app.py` — FastAPI: login, library, jobs, files, owner admin. Every POST needs `X-Studio: 1`; members only see their own assets and jobs.
+- `studio/jobs.py`, `studio/pipelines.py` — SQLite job queue, resumable steps. A paid fal call stores its `request_id` before waiting, so a retry or restart never pays twice.
+- `studio/falclient.py`, `studio/ledger.py` — every fal call is reserve → submit → settle/refund.
+- `studio/llm.py` — synthetic Anthropic-compatible Messages API (`https://api.synthetic.new/anthropic`).
+- `studio/meshio.py`, `audit.py`, `segment.py`, `threemf.py` — MOD-04 (trimesh + manifold3d + voxel remesh, Lab k-means colour regions, Bambu `paint_color` 3MF, closed per-colour parts).
+- `studio/blender.py`, `blender_runner.py` — MOD-03 with a fixed op list (no arbitrary Python).
+- `studio/web/` — Turkish, mobile-first page. three.js 0.160 is bundled locally.
+- aicp change (by `aicp-gelistirici`, commit `013e050`): `POST /hook/notify` on `10.0.1.1:7812` with a `notify`-only token, used by the studio for Serkan's notifications.
+
+### Still to verify on real hardware
+- Open an exported painted 3MF in Bambu Studio and check that the colours appear on the right faces. The encoding follows PrusaSlicer's TriangleSelector format, which Bambu reads as `paint_color`. Fallback: the parts-mode STL zip.
+- First real fal run of each model, to compare actual cost with the estimates in `config.DEFAULT_PRICES`.

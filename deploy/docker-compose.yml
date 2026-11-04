@@ -1,0 +1,40 @@
+# asli.serkan.work — Mom_Design 3D studio. Lives in /Serkan/MomDesign on the server.
+# Coolify's Traefik (coolify network) terminates TLS; no host port is opened.
+services:
+  mom-design:
+    build: ./src
+    image: mom-design:latest
+    container_name: mom-design
+    restart: unless-stopped
+    environment:
+      STUDIO_PUBLIC_URL: https://asli.serkan.work
+      STUDIO_WORKERS: "2"
+      STUDIO_FAL_BALANCE_USD: "9"
+      STUDIO_DAILY_CAP_USD: "3"
+      STUDIO_AUTO_TOPUP_USD: "5"
+      FAL_KEY_FILE: /run/secrets/fal.key
+      SYN_API_KEY_FILE: /run/syn/synthetic.key
+      AICP_NOTIFY_URL: http://10.0.1.1:7812/hook/notify
+      AICP_NOTIFY_TOKEN_FILE: /run/secrets/aicp_notify.token
+    volumes:
+      - ./data:/data
+      - ./secrets:/run/secrets:ro
+      - /home/Seko-Claude/.config/aicp/providers/synthetic.key:/run/syn/synthetic.key:ro
+    mem_limit: 4g
+    cpus: 4
+    networks: [coolify]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.services.mom-design.loadbalancer.server.port=8000
+      - traefik.http.middlewares.mom-design-https.redirectscheme.scheme=https
+      - traefik.http.routers.mom-design.rule=Host(`asli.serkan.work`)
+      - traefik.http.routers.mom-design.entrypoints=https
+      - traefik.http.routers.mom-design.tls=true
+      - traefik.http.routers.mom-design.tls.certresolver=letsencrypt
+      - traefik.http.routers.mom-design-http.rule=Host(`asli.serkan.work`)
+      - traefik.http.routers.mom-design-http.entrypoints=http
+      - traefik.http.routers.mom-design-http.middlewares=mom-design-https
+networks:
+  coolify:
+    external: true

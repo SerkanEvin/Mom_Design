@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#b5532f">
+<title>Tasarım Atölyesi</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 6 56 19v26L32 58 8 45V19z' fill='%23b5532f'/%3E%3Cpath d='M32 6v26l24-13M32 32 8 19M32 32v26' stroke='%23fff' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+<script type="importmap">
+{"imports": {"three": "/static/vendor/three/build/three.module.min.js",
+             "three/addons/": "/static/vendor/three/examples/jsm/"}}
+</script>
+</head>
+<body>
+<header class="top" id="top" hidden>
+  <a class="brand" href="#/"><span class="logo" aria-hidden="true"></span><span>Tasarım Atölyesi</span></a>
+  <nav class="topnav">
+    <a href="#/" data-nav="lib">Kitaplık</a>
+    <a href="#/new" data-nav="new">Yeni</a>
+    <a href="#/admin" data-nav="admin" id="nav-admin" hidden>Yönetim</a>
+  </nav>
+  <div class="who">
+    <span class="chip" id="credit" title="fal.ai kredisi"></span>
+    <button class="ghost small" id="logout" type="button">Çıkış</button>
+  </div>
+</header>
+<main id="app" aria-live="polite"></main>
+<div class="toast" id="toast" role="status" hidden></div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
