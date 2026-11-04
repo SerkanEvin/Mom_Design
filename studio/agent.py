@@ -118,16 +118,22 @@ def _dialog_text(j: Job) -> str:
     return out
 
 
-def _settle_plan(j: Job, make_plan, est_usd) -> dict:
-    """Plan once; pause for a question when the agent really needs one, and (from the user's
-    N+1th send on) show the plan and wait for "Tamam". Answers arrive through /api/jobs/<id>/answer."""
-    s = get_settings()
+def _needs_confirm(j: Job) -> bool:
+    """From the user's N+1th agent send on, the plan waits for "Tamam" (fixed once per job)."""
     if "confirm" not in j.ctx:
         earlier = db.row("SELECT COUNT(*) AS n FROM jobs WHERE user_id=? AND module='agent' AND created_at<?"
                          " AND id<>?", j.user_id, db.row("SELECT created_at FROM jobs WHERE id=?", j.id)["created_at"],
                          j.id)["n"]
-        j.ctx["confirm"] = earlier >= s.agent_confirm_after
+        j.ctx["confirm"] = earlier >= get_settings().agent_confirm_after
         j.save()
+    return j.ctx["confirm"]
+
+
+def _settle_plan(j: Job, make_plan, est_usd) -> dict:
+    """Plan once; pause for a question when the agent really needs one, and (from the user's
+    N+1th send on) show the plan and wait for "Tamam". Answers arrive through /api/jobs/<id>/answer."""
+    s = get_settings()
+    _needs_confirm(j)
     if "plan" not in j.ctx:
         plan = make_plan()
         asked = sum(1 for d in j.ctx.get("dialog", []) if d.get("kind") == "question")
@@ -160,6 +166,7 @@ def answer(j: Job, text: str, ok: bool) -> None:
     if ask.get("kind") == "confirm":
         if ok and not text:
             j.ctx["confirmed"] = True
+            dialog.append({"kind": "confirm_ok", "plan": ask.get("text"), "answer": "Tamam"})
         else:   # she wants a change: re-plan with her words, then confirm again
             dialog.append({"kind": "change", "plan": ask.get("text"), "answer": text})
             j.ctx.pop("plan", None)
@@ -217,6 +224,20 @@ def _run_model(j: Job, eff: dict) -> None:
     notes = j.input.get("notes", [])
     path, ver, meta = version_path(j.input["version_id"])
     height = _clamp(j.input.get("height_mm") or meta.get("height_mm"), 5, 250, 80)
+    from . import aicp_agent
+    if aicp_agent.enabled():                  # studio-editor (Claude Code + Blender + memory) does it all
+        if not j.ctx.get("edited"):
+            res = aicp_agent.run_model_job(j, notes=notes, extra=j.input.get("extra", ""), eff=eff,
+                                           confirm_plan=_needs_confirm(j), height=height, source="agent")
+            j.ctx["agent_result"] = res
+            j.ctx["edited"] = True
+            j.save()
+        res = j.ctx["agent_result"]
+        plan = {"route": "edit", "explanation_tr": res.get("message_tr"), "praise_tr": res.get("praise_tr"),
+                "tips_tr": res.get("tips_tr") or [], "colors": res.get("colors")}
+        j.ctx["edit_result"] = {"notes": [], "missing_tr": res.get("missing_tr") or [], "undone": 0}
+        _finish(j, plan, _clamp(res.get("height_mm"), 1, 250, height), int(_clamp(res.get("colors"), 1, 4, 3)))
+        return
     with blender_lock():                      # the plan is made while LOOKING at the model and the pins
         blender.start_edit(j, path, height)
 

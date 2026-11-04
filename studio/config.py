@@ -59,7 +59,8 @@ def secret(name: str) -> str:
     """Current value of a secret: env/file first, then the copy saved from the admin page (data/secrets)."""
     s = get_settings()
     env = {"fal": ("FAL_KEY", "FAL_KEY_FILE"), "syn": ("SYN_API_KEY", "SYN_API_KEY_FILE"),
-           "notify": ("AICP_NOTIFY_TOKEN", "AICP_NOTIFY_TOKEN_FILE")}[name]
+           "notify": ("AICP_NOTIFY_TOKEN", "AICP_NOTIFY_TOKEN_FILE"),
+           "studio": ("AICP_STUDIO_TOKEN", "AICP_STUDIO_TOKEN_FILE")}[name]
     v = _read_secret(*env)
     if not v:
         p = s.data_dir / "secrets" / f"{name}.key"
@@ -90,6 +91,12 @@ class Settings:
 
     notify_url: str = field(default_factory=lambda: os.environ.get("AICP_NOTIFY_URL", ""))
     notify_token: str = field(default_factory=lambda: _read_secret("AICP_NOTIFY_TOKEN", "AICP_NOTIFY_TOKEN_FILE"))
+    # Blender work by the aicp agent `studio-editor` (Claude Code): hook base URL, shared job folder as this
+    # container sees it and as the agent sees it. Without a studio token the built-in loop is used.
+    studio_hook_url: str = field(default_factory=lambda: os.environ.get("AICP_STUDIO_URL", ""))
+    exchange_dir: str = field(default_factory=lambda: os.environ.get("STUDIO_EXCHANGE", "/exchange"))
+    agent_jobs_dir: str = field(default_factory=lambda: os.environ.get(
+        "STUDIO_AGENT_JOBS", "/srv/aicp-work/studio-editor/jobs"))
 
     # Money rules (USD)
     auto_topup_usd: float = field(default_factory=lambda: _f("STUDIO_AUTO_TOPUP_USD", 5.0))

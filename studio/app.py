@@ -405,7 +405,7 @@ async def answer_job(job_id: str, req: Request, u=Depends(current_user)):
     """Her answer to the agent's question or plan ("ok": true = Tamam). The job continues from where it paused."""
     from . import agent
     r = _job_for(u, job_id)
-    if r["status"] != "waiting" or r["module"] != "agent":
+    if r["status"] != "waiting" or r["module"] not in ("agent", "edit"):
         raise HTTPException(409, "Bu iş bir cevap beklemiyor")
     b = await req.json()
     text = str(b.get("text", "")).strip()[:600]

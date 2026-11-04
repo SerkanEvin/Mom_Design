@@ -155,3 +155,23 @@ and star side by side", 3 "both feet equal"):
 
 Not covered yet: resizing one part (e.g. one foot) and recolouring a printed picture would need new Blender
 operations (a region scale and a texture paint).
+
+---
+
+## 6. Blender work moves to an aicp agent (2026-11-04, Serkan's decision)
+
+Serkan: "Aslı is my mother and only she does the job, so no protection is needed." The fixed operation list is
+replaced by the aicp agent **`studio-editor`** (Claude Code, `claude-opus-5-5`, effort medium, developer profile,
+workdir `/srv/aicp-work/studio-editor`). It has its own Blender 5.2.3 LTS at `…/blender/blender`, writes free
+Blender Python, reviews its own renders before and after, and keeps memory in its vault folder. A sandboxed
+free-code option for other users comes later.
+
+- **Exchange:** `/srv/aicp-work/studio-editor/jobs/<job_id>/` (2777) is mounted in the container as `/exchange`.
+  The studio writes `job.json` (protocol, notes with `pin_gltf` + `pin_mm`, effort, dialog, `confirm_plan`) and
+  `input.glb`. The agent writes `result.glb` + `result.json` (`done|question|confirm|failed`, praise, message,
+  missing, tips, height, colours) and optionally `renders/*.png`.
+- **Messages:** aicp hook `POST /hook/studio/send`, `GET /hook/studio/status` on `10.0.1.1:7812`, with a token
+  that can only reach `studio-editor` (`secrets/aicp_studio.token`). Her answers go to the same session.
+- **Studio** (`studio/aicp_agent.py`): agent jobs on models and the Blender edit page (request + eraser marks
+  become notes) are handed to the agent. Drawings (relief/figure) and photo → 3D stay as they are. Without the token
+  the built-in loop is used (tests, fallback).

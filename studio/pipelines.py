@@ -397,7 +397,24 @@ def agent_job(j: Job) -> None:
 
 
 def edit(j: Job) -> None:
-    from . import blender
+    from . import aicp_agent, blender
+    if aicp_agent.enabled():
+        # the Blender page's request + eraser marks go to studio-editor as notes
+        notes = [{"n": i + 1, "text": f"Burayı sil (yaklaşık {float(e.get('r_mm', 4)):g} mm yarıçapında)", "p": e["p"]}
+                 for i, e in enumerate(j.input.get("erase") or [])]
+        directive = (j.input.get("directive") or "").strip()
+        if directive:
+            notes.append({"n": len(notes) + 1, "text": directive, "p": None})
+        if not j.ctx.get("edited"):
+            res = aicp_agent.run_model_job(j, notes=notes, extra="", eff=effort(j.input.get("effort")),
+                                           confirm_plan=False, height=float(j.input.get("height_mm", 80)),
+                                           source="mod03")
+            j.ctx["edited"] = True
+            j.ctx["result"] = {"asset_id": j.asset_id, "version_id": j.version_id,
+                               "notes": [x for x in [res.get("praise_tr"), res.get("message_tr")] if x],
+                               "missing_tr": res.get("missing_tr") or [], "undone": 0}
+            j.save()
+        return
     with blender_lock():
         blender.edit_loop(j)
 

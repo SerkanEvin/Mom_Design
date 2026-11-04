@@ -16,10 +16,16 @@ services:
       SYN_API_KEY_FILE: /run/syn/synthetic.key
       AICP_NOTIFY_URL: http://10.0.1.1:7812/hook/notify
       AICP_NOTIFY_TOKEN_FILE: /run/secrets/aicp_notify.token
+      # Blender work by the aicp agent studio-editor (Claude Code); without the token the built-in loop runs
+      AICP_STUDIO_URL: http://10.0.1.1:7812
+      AICP_STUDIO_TOKEN_FILE: /run/secrets/aicp_studio.token
+      STUDIO_EXCHANGE: /exchange
+      STUDIO_AGENT_JOBS: /srv/aicp-work/studio-editor/jobs
     volumes:
       - ./data:/data
       - ./secrets:/run/secrets:ro
       - /home/Seko-Claude/.config/aicp/providers/synthetic.key:/run/syn/synthetic.key:ro
+      - /srv/aicp-work/studio-editor/jobs:/exchange
     mem_limit: 4g
     cpus: 4
     networks: [coolify]
