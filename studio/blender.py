@@ -182,7 +182,10 @@ Operations:
    "size_mm":[x,y,z],"rotation_deg":[x,y,z], and EITHER "center_mm":[x,y,z] OR "anchor":{...},"depth_into_mm":n}
   e.g. a round base under the figure: boolean_union cylinder size [d,d,3], center [0,0,-1.5] then drop_to_bed.
   A hole: boolean_difference cylinder at an anchor with depth_into_mm = half its length.
-- {"op":"remove_loose_parts","min_fraction":0.02}  delete small floating pieces (strings, specks).
+- {"op":"remove_loose_parts","min_fraction":0.02}  delete small floating pieces (specks, detached strings).
+  To cut off a thin piece that is ATTACHED (a strap, a stick), boolean_difference a small cube placed exactly
+  over that piece where it is visible in the image; a cut whose anchor misses the surface fails (it never
+  slides onto the body). Never drill through the figure.
 - {"op":"remesh_voxel","voxel_mm":0.4}  LAST RESORT: rebuilds the surface and blurs detail. Do not use it to
   "clean" a model; use remove_loose_parts. Never below 0.3 mm, at most once.
 - {"op":"smooth","iterations":1..10,"factor":0..1}, {"op":"scale","factor":[x,y,z]}, {"op":"rotate","degrees":[x,y,z]},

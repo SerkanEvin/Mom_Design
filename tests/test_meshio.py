@@ -26,3 +26,17 @@ def test_color_scaling():
     assert np.allclose(meshio._to_255(a16), [[255, 0, 128]], atol=0.6)
     assert np.allclose(meshio._to_255(np.array([[1.0, 0.0, 0.5]])), [[255, 0, 127.5]])
     assert np.allclose(meshio._to_255(np.array([[200, 10, 0]], dtype=np.uint8)), [[200, 10, 0]])
+
+
+def test_vertex_colours_roundtrip_srgb(tmp_path):
+    """Stored COLOR_0 is linear (glTF spec); reading it back gives the same sRGB colour."""
+    import trimesh as tm
+    m = tm.creation.box((10, 10, 10))
+    m.metadata["face_rgb"] = np.tile([200, 40, 40], (len(m.faces), 1)).astype(np.uint8)
+    p = meshio.export_glb_with_colors(m, tmp_path / "c.glb", up="z")
+    raw = tm.load(p, force="mesh").visual.vertex_colors[0][:3]
+    assert raw[0] < 160          # linear value written, not the sRGB 200
+    back = meshio.face_rgb(meshio.load(p))
+    assert np.allclose(back[0], [200, 40, 40], atol=4)
+    s = meshio.ColorSampler(p).sample(np.array([[0.0, 5.01, 0.0]]))[0][0]
+    assert np.allclose(s, [200, 40, 40], atol=4)

@@ -142,10 +142,10 @@ def cast(obj, origin, direction, max_dist=1e5):
     return (loc, normal) if ok else (None, None)
 
 
-def hit(obj, anchor):
-    """Surface point under an anchor; if the ray just misses, look up to 10 grid units around it."""
+def hit(obj, anchor, search=10):
+    """Surface point under an anchor; if the ray just misses, look up to `search` grid units around it."""
     u0, v0 = anchor["u"], anchor["v"]
-    for r in (0, 2, 4, 6, 8, 10):
+    for r in [x for x in (0, 2, 4, 6, 8, 10) if x <= search]:
         steps = [(0, 0)] if r == 0 else [(r * math.cos(a), r * math.sin(a)) for a in
                                           (k * math.pi / 4 for k in range(8))]
         for du, dv in steps:
@@ -262,9 +262,10 @@ def join(target, tool):
     bpy.ops.object.join()
 
 
-def primitive_center(obj, o):
+def primitive_center(obj, o, op):
     if o.get("anchor"):
-        loc, _n, d = hit(obj, o["anchor"])
+        # a cut that misses must not slide onto another part (e.g. the body behind a string)
+        loc, _n, d = hit(obj, o["anchor"], search=0 if op == "boolean_difference" else 4)
         return loc + d * o.get("depth_into_mm", 0.0)   # positive = into the body along the view direction
     return Vector(o["center_mm"])
 
@@ -318,7 +319,7 @@ def emboss_text(obj, o):
     lo, hi = bbox(obj)
     across = abs((hi - lo).dot(vw["right"]))
     t, w, h = text_object(o["text"], o["size_mm"], o.get("max_width_mm") or across * 0.8)
-    centre, _n, d = hit(obj, o["anchor"])
+    centre, _n, d = hit(obj, o["anchor"], search=6)
     depth = o["depth_mm"]
     right, up = vw["right"], vw["up"]
     base_start = centre - d * (FRAME["size"] * 2)   # rays start far in front of the anchor
@@ -439,7 +440,7 @@ def run_op(obj, ref, o):
             translate(ob, Vector(o["mm"]))
         FRAME["c"] = FRAME["c"] + Vector(o["mm"])     # anchors stay glued to the model
     elif op in ("boolean_difference", "boolean_union", "add_primitive"):
-        tool = primitive(o["shape"], o["size_mm"], primitive_center(obj, o), o["rotation_deg"])
+        tool = primitive(o["shape"], o["size_mm"], primitive_center(obj, o, op), o["rotation_deg"])
         if op == "add_primitive":
             join(obj, tool)
         else:

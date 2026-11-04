@@ -36,9 +36,21 @@ def _to_255(a: np.ndarray) -> np.ndarray:
     return a.astype(float)
 
 
-def _face_colors(geom: trimesh.Trimesh) -> np.ndarray:
-    """RGB per face (uint8). Textures are sampled at vertex UVs."""
+def srgb_to_linear255(c: np.ndarray) -> np.ndarray:
+    x = np.asarray(c, dtype=float) / 255.0
+    return np.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055) ** 2.4) * 255.0
+
+
+def linear_to_srgb255(c: np.ndarray) -> np.ndarray:
+    x = np.clip(np.asarray(c, dtype=float) / 255.0, 0, 1)
+    return np.where(x <= 0.0031308, x * 12.92, 1.055 * x ** (1 / 2.4) - 0.055) * 255.0
+
+
+def _face_colors(geom: trimesh.Trimesh, linear: bool = False) -> np.ndarray:
+    """sRGB per face (uint8). Textures are sampled at vertex UVs. `linear`: vertex colours are glTF COLOR_0,
+    which the glTF spec defines as linear, so they are converted back to sRGB."""
     n = len(geom.faces)
+    fix = linear_to_srgb255 if linear else (lambda a: a)
     vis = geom.visual
     try:
         if isinstance(vis, trimesh.visual.texture.TextureVisuals):
@@ -52,7 +64,7 @@ def _face_colors(geom: trimesh.Trimesh) -> np.ndarray:
             attr = getattr(vis, "vertex_attributes", {}).get("color")
             if attr is not None and len(attr) == len(geom.vertices):
                 vc = _to_255(np.asarray(attr)[:, :3])
-                return np.clip(vc[geom.faces].mean(axis=1), 0, 255).astype(np.uint8)
+                return np.clip(fix(vc[geom.faces].mean(axis=1)), 0, 255).astype(np.uint8)
             base = getattr(mat, "baseColorFactor", None)
             if base is None:
                 base = getattr(mat, "main_color", None)
@@ -61,9 +73,9 @@ def _face_colors(geom: trimesh.Trimesh) -> np.ndarray:
         elif isinstance(vis, trimesh.visual.color.ColorVisuals):
             if vis.kind == "vertex":
                 vc = np.asarray(vis.vertex_colors)[:, :3].astype(float)
-                return vc[geom.faces].mean(axis=1).astype(np.uint8)
+                return np.clip(fix(vc[geom.faces].mean(axis=1)), 0, 255).astype(np.uint8)
             if vis.kind == "face":
-                return np.asarray(vis.face_colors)[:, :3].astype(np.uint8)
+                return np.clip(fix(np.asarray(vis.face_colors)[:, :3]), 0, 255).astype(np.uint8)
     except Exception:
         pass
     return np.full((n, 3), 200, dtype=np.uint8)
@@ -94,6 +106,7 @@ def load(path: Path) -> trimesh.Trimesh:
     ext = path.suffix.lower()
     if ext not in MESH_EXTS:
         raise MeshError("Desteklenmeyen dosya türü. GLB, OBJ, STL, PLY, 3MF veya STEP olmalı.")
+    linear = ext in (".glb", ".gltf")
     if ext in (".step", ".stp"):
         loaded = _load_step(path)
     else:
@@ -108,13 +121,13 @@ def load(path: Path) -> trimesh.Trimesh:
             transform, gname = loaded.graph[node]
             g = loaded.geometry[gname]
             if isinstance(g, trimesh.Trimesh) and len(g.faces):
-                colors.append(_face_colors(g))      # before copy(): copy drops glTF vertex attributes
+                colors.append(_face_colors(g, linear))   # before copy(): copy drops glTF vertex attributes
                 g = trimesh.Trimesh(g.vertices.copy(), g.faces.copy(), process=False)
                 g.apply_transform(transform)
                 geoms.append(g)
     elif isinstance(loaded, trimesh.Trimesh):
         geoms = [loaded]
-        colors = [_face_colors(loaded)]
+        colors = [_face_colors(loaded, linear)]
     if not geoms:
         raise MeshError("Dosyada üçgen ağ (mesh) yok.")
     merged = trimesh.util.concatenate([trimesh.Trimesh(g.vertices, g.faces, process=False) for g in geoms])
@@ -162,7 +175,8 @@ def export_glb_with_colors(m: trimesh.Trimesh, path: Path, up: str = "y") -> Pat
     rgb = face_rgb(m)
     v = m.vertices[m.faces].reshape(-1, 3)
     f = np.arange(len(v)).reshape(-1, 3)
-    vc = np.repeat(np.c_[rgb, np.full(len(rgb), 255)], 3, axis=0).astype(np.uint8)
+    lin = np.clip(np.round(srgb_to_linear255(rgb)), 0, 255)       # glTF COLOR_0 is linear
+    vc = np.repeat(np.c_[lin, np.full(len(lin), 255)], 3, axis=0).astype(np.uint8)
     g = trimesh.Trimesh(v, f, vertex_colors=vc, process=False)
     if up == "z":
         g.apply_transform(Z_TO_Y)
@@ -220,7 +234,7 @@ class ColorSampler:
         meshes, rgbs, self.textured = [], [], []
         offset = 0
         for g, tf in _scene_parts(path):
-            rgb = _face_colors(g)
+            rgb = _face_colors(g, linear=True)
             m = trimesh.Trimesh(g.vertices.copy(), g.faces.copy(), process=False)
             m.apply_transform(tf)
             vis = g.visual
